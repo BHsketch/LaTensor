@@ -5,3 +5,5 @@ packages_before.txt
 results_cpp.csv
 results_tvm.csv
 setup_tvm.sh
+frontend/build/*
+.DS_Store

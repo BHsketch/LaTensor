@@ -1,0 +1,1 @@
+clang -Xclang -load -Xclang ./build/plugin/libTranslator.so -Xclang -plugin -Xclang detect-for-loops matmul.c
