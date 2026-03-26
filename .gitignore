@@ -1,0 +1,6 @@
+matmul_tvm_ar.py
+tvm_logs/
+packages_before.txt
+results_cpp.csv
+results_tvm.csv
+setup_tvm.sh
