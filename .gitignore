@@ -6,4 +6,6 @@ results_cpp.csv
 results_tvm.csv
 setup_tvm.sh
 frontend/build/*
+claude_gen/
+CLAUDE.md
 .DS_Store
