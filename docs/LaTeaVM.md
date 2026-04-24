@@ -10,3 +10,22 @@ Let's say we go the masking route. Here, too we need to be careful on how to gen
 
 In the first version, we have an `if vj<vi` which prevents TVM from vectorizing the statements that follow. Ideally though, one could have done redundant computations to get any parallelism that it can, and then discard values we don't need. The latter is what is done in the second version using the `T.if_then_else()` construct.
 
+### Considerations when translating 
+Here we focus on how to filter Polyhedral-safe loops into TVM-safe ones,
+since the latter will be a subset of the former.
+- multi writes in a single block
+- conditionals -> if_then_else
+- scalars, temps -> need buffer
+- iteration rectangularity
+- function calls must inline
+- aliasing must be enforced
+- loop canonicalization
+
+## The overall flow
+- we put c(++) code into llvm to make ir
+- run opt to do: inlining
+- we run the scop detection on it
+  - we get loop nests list to get nice loops
+- run polly and export JSCoP.
+- filter JSCoP files to get super nice loops
+- write a simple parser and translator to convert JSCoP into TVM code
