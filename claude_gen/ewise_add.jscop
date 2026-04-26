@@ -1,0 +1,21 @@
+{
+   "arrays" : [
+      { "name" : "A", "sizes" : [ "*", "N" ], "type" : "float" },
+      { "name" : "B", "sizes" : [ "*", "N" ], "type" : "float" },
+      { "name" : "C", "sizes" : [ "*", "N" ], "type" : "float" }
+   ],
+   "context" : "[N] -> {  : N >= 1 }",
+   "name" : "ewise_add",
+   "statements" : [
+      {
+         "accesses" : [
+            { "kind" : "read",  "relation" : "[N] -> { Stmt_C[i0, i1] -> MemRef_A[i0, i1] }" },
+            { "kind" : "read",  "relation" : "[N] -> { Stmt_C[i0, i1] -> MemRef_B[i0, i1] }" },
+            { "kind" : "write", "relation" : "[N] -> { Stmt_C[i0, i1] -> MemRef_C[i0, i1] }" }
+         ],
+         "domain"   : "[N] -> { Stmt_C[i0, i1] : 0 <= i0 < N and 0 <= i1 < N }",
+         "name"     : "Stmt_C",
+         "schedule" : "[N] -> { Stmt_C[i0, i1] -> [i0, i1] }"
+      }
+   ]
+}
