@@ -9,3 +9,5 @@ frontend/build/*
 CLAUDE.md
 .DS_Store
 llvm-project/
+setup.sh
+claude_gen/

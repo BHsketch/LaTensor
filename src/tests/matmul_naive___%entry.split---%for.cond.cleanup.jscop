@@ -1,0 +1,103 @@
+{
+   "arrays": [
+      {
+         "name": "MemRef0",
+         "sizes": [
+            "*",
+            "(zext i32 %N to i64)"
+         ],
+         "type": "float"
+      },
+      {
+         "name": "MemRef2",
+         "sizes": [
+            "*",
+            "(zext i32 %N to i64)"
+         ],
+         "type": "float"
+      },
+      {
+         "name": "MemRef3",
+         "sizes": [
+            "*",
+            "(zext i32 %N to i64)"
+         ],
+         "type": "float"
+      },
+      {
+         "name": "Packed_B",
+         "sizes": [
+            "256",
+            "512",
+            "8"
+         ],
+         "type": "float"
+      },
+      {
+         "name": "Packed_A",
+         "sizes": [
+            "24",
+            "512",
+            "4"
+         ],
+         "type": "float"
+      }
+   ],
+   "context": "[p_0] -> {  : -2147483648 <= p_0 <= 2147483647 }",
+   "name": "%entry.split---%for.cond.cleanup",
+   "statements": [
+      {
+         "accesses": [
+            {
+               "kind": "write",
+               "relation": "[p_0] -> { Stmt4[i0, i1, i2] -> MemRef0[i0, i1] }"
+            },
+            {
+               "kind": "read",
+               "relation": "[p_0] -> { Stmt4[i0, i1, i2] -> MemRef0[i0, i1] }"
+            },
+            {
+               "kind": "read",
+               "relation": "[p_0] -> { Stmt4[i0, i1, i2] -> Packed_A[o0, o1, o2] : (-i2 + o1) mod 512 = 0 and (-i0 + 4o0 + o2) mod 96 = 0 and 0 <= o0 <= 23 and 0 <= o1 <= 511 and 0 <= o2 <= 3 }"
+            },
+            {
+               "kind": "read",
+               "relation": "[p_0] -> { Stmt4[i0, i1, i2] -> Packed_B[o0, o1, o2] : (-i2 + o1) mod 512 = 0 and (-i1 + 8o0 + o2) mod 2048 = 0 and 0 <= o0 <= 255 and 0 <= o1 <= 511 and 0 <= o2 <= 7 }"
+            }
+         ],
+         "domain": "[p_0] -> { Stmt4[i0, i1, i2] : 0 <= i0 < p_0 and 0 <= i1 < p_0 and 0 <= i2 < p_0 }",
+         "name": "Stmt4",
+         "schedule": "[p_0] -> { Stmt4[i0, i1, i2] -> [o0, o1, 1, o3, 1, o5, o6, i2 - 512o1, i0 - 96o3 - 4o6, i1 - 2048o0 - 8o5, 0] : -2047 + i1 <= 2048o0 <= i1 and -511 + i2 <= 512o1 <= i2 and -95 + i0 <= 96o3 <= i0 and -7 + i1 - 2048o0 <= 8o5 <= i1 - 2048o0 and -3 + i0 - 96o3 <= 4o6 <= i0 - 96o3 }"
+      },
+      {
+         "accesses": [
+            {
+               "kind": "write",
+               "relation": "[p_0] -> { CopyStmt_0[i0, i1, i2] -> Packed_B[o0, o1, o2] : (-i2 + o1) mod 512 = 0 and (-i1 + o2) mod 8 = 0 and 0 <= o1 <= 511 and 0 <= o2 <= 7 and -7 + i1 - 8o0 <= 2048*floor((i1)/2048) <= i1 - 8o0 }"
+            },
+            {
+               "kind": "read",
+               "relation": "[p_0] -> { CopyStmt_0[i0, i1, i2] -> MemRef3[i2, i1] }"
+            }
+         ],
+         "domain": "[p_0] -> { CopyStmt_0[i0, i1, i2] : 0 <= i0 < p_0 and 0 <= i1 < p_0 and 0 <= i2 < p_0 }",
+         "name": "CopyStmt_0",
+         "schedule": "[p_0] -> { CopyStmt_0[0, i1, i2] -> [o0, o1, 0, 0, 0, 0, 0, 0, 0, 0, 0] : -2047 + i1 <= 2048o0 <= i1 and -511 + i2 <= 512o1 <= i2 }"
+      },
+      {
+         "accesses": [
+            {
+               "kind": "write",
+               "relation": "[p_0] -> { CopyStmt_1[[i0, i1, i2] -> MemRef2[i3, i4]] -> Packed_A[o0, o1, o2] : (-i4 + o1) mod 512 = 0 and (-i3 + o2) mod 4 = 0 and i0 >= 0 and 2048i0 < p_0 and i1 >= 0 and i2 >= 0 and 96i2 <= i3 <= 95 + 96i2 and 512i1 <= i4 <= 511 + 512i1 and 0 <= o0 <= 23 and 0 <= o1 <= 511 and 0 <= o2 <= 3 and 4*floor((i3)/4) > -p_0 + 96i2 + i3 + 4o0 and -3 + i3 - 4o0 <= 96*floor((i3)/96) <= i3 - 4o0 and 512*floor((i4)/512) > -p_0 + 512i1 + i4 }"
+            },
+            {
+               "kind": "read",
+               "relation": "[p_0] -> { CopyStmt_1[[i0, i1, i2] -> MemRef2[i3, i4]] -> MemRef2[o0, o1] : (i3 - o0) mod 4 = 0 and (i4 - o1) mod 512 = 0 and i0 >= 0 and 2048i0 < p_0 and i1 >= 0 and i2 >= 0 and 96i2 <= i3 <= 95 + 96i2 and 512i1 <= i4 <= 511 + 512i1 and 96i2 <= o0 <= 95 + 96i2 and 512i1 <= o1 <= 511 + 512i1 and 4*floor((i3)/4) > -p_0 + 96i2 + i3 + 4*floor((o0)/4) - 96*floor((o0)/96) and -3 + i3 - 4*floor((o0)/4) + 96*floor((o0)/96) <= 96*floor((i3)/96) <= i3 - 4*floor((o0)/4) + 96*floor((o0)/96) and 512*floor((i4)/512) > -p_0 + 512i1 + i4 }"
+            }
+         ],
+         "domain": "[p_0] -> { CopyStmt_1[[i0, i1, i2] -> MemRef2[i3, i4]] : i0 >= 0 and 2048i0 < p_0 and i1 >= 0 and i2 >= 0 and 96i2 <= i3 <= 95 + 96i2 and 512i1 <= i4 <= 511 + 512i1 and 96*floor((i3)/96) > -p_0 + 96i2 + i3 and 512*floor((i4)/512) > -p_0 + 512i1 + i4 }",
+         "name": "CopyStmt_1",
+         "schedule": "[p_0] -> { CopyStmt_1[[i0, i1, i2] -> MemRef2[i3, i4]] -> [i0, i1, 1, i2, 0, 0, 0, 0, 0, 0, 0] }"
+      }
+   ]
+}
