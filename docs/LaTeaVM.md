@@ -108,3 +108,8 @@ Ease of conversion: For loops with no loop carried dependencies it doesn't reall
 
 ### In summary
 For any user-written code that is already partially scheduled, optimally tuning it in TVM would require that we first recover necessary high-level information, and give TVM the right distinction between what belongs to the domain and what belongs to the schedule.
+
+# Todo
+Apparently, there's some analysis theory dedicated to detecting reductions (check Allen and Kennedy, Section 5.6). We should probably have a look because the generality of the same could be useful to include within our framework.
+<img width="1047" height="625" alt="image" src="https://github.com/user-attachments/assets/be51d4ff-cc75-4e6e-adc4-119eb794673c" />
+
