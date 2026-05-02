@@ -109,7 +109,21 @@ Ease of conversion: For loops with no loop carried dependencies it doesn't reall
 ### In summary
 For any user-written code that is already partially scheduled, optimally tuning it in TVM would require that we first recover necessary high-level information, and give TVM the right distinction between what belongs to the domain and what belongs to the schedule.
 
-# Todo
-Apparently, there's some analysis theory dedicated to detecting reductions (check Allen and Kennedy, Section 5.6). We should probably have a look because the generality of the same could be useful to include within our framework.
+## Finding the operation
+While the JSCoP gives us the distinction between the program and the schedule, it doesn't give us the actual operation being performed. Generally, our hypothesis is that we'll need a lot of additional information from the source code, along with the polly results in order to generate the final TVM, which means instead of running polly as a stand-alone tool, it might be better to call it as a plugin from a general lowering pipeline. As a result ... \<write more about the plugin approach\> 
+
+## Detecting Reductions
+Apparently, there's some analysis theory dedicated to detecting reductions (check Allen and Kennedy, Section 5.6).
 <img width="1047" height="625" alt="image" src="https://github.com/user-attachments/assets/be51d4ff-cc75-4e6e-adc4-119eb794673c" />
 
+The full text can be found in the book by Allen and Kennedy (Optimizing Compilers for Modern Architectures), but the summary is that there are three properties of a computation that can serve as necessary and sufficient conditions for being a reduction:
+1. They reduce the elements of some vector or array dimension down to one element. This property can be checked by looking at the dependence graph for the corresponding statement. The condition is true if the dependence graph has all three kinds of dependencies:
+   - an output dependence, because we always aggregate in the same final scalar variable
+   - a true dependence, because the partially accumulated result is read in subsequent iterations
+   - an antidependence, because the partial results are rewritten
+2. Only the final result of the reduction is used later
+3. There is no variation inside the intermediate accumulation. That is, the reduction operates on the vector and nothing else.
+
+Particularly, if a computation follows all three rules, it's definitely a reduction. If it follows the first and third rules, but not the second, (i.e. if the intermediate results are used as well), it's no longer a reduction, but a scan. TODO: What computation is represented by only not following the third rule?
+
+The key observation here is that it's not that TVM is incapable of representing these patterns, but that to infer which _kind_ of reduction we need in our generated TVM code, we will have to do some additional analysis on the JSCoP by looking at all the reads and writes it has detected inside the SCoP, forming a dependence graph out of them, and seeing what constraints from above are satisfied/violated.
