@@ -1,4 +1,7 @@
 # The Polyhedral Route
+## Story
+At some point, polyhedral transformations were done through pattern-matching over ASTs. The developers of Polly realized, however, that LLVM does a good job of lowering complicated syntax into simpler, more general IR, and also does a lot of heavy analyses that are important for polyhedral optimizations. Polly leverages these to specialize these generic transformations for their use-case which was polyhedral optimizations. In order to translate cpp to TVM, hence, which is arguably a more specific problem than what polly achieves, we use Polly itself as a base similar to how Polly uses LLVM: (1) Polly does a lot of heavy-lifting for us in terms of scop detection and (2) from what we understand, TVM semantics are (almost) a subset of what polyhedral frameworks consider valid.
+
 ## Shape Problem
 Apparently polyhedral optimizers like polly will isolate, not rectangular, but *convex* iteration spaces --- where the iteration variables are affine functions of the iteration variables surrounding them. So as a first option we could trivially filter out only rectangular iteration spaces, but if we wanted to deal with other spaces as well we can:
 1. split them up into rectangular and non-rectangular regions. The problem here is that if the split contains multiple rectangular regions, TVM will have to tune for all of them separately which will lead to very long compilation times.
@@ -127,3 +130,9 @@ The full text can be found in the book by Allen and Kennedy (Optimizing Compiler
 Particularly, if a computation follows all three rules, it's definitely a reduction. If it follows the first and third rules, but not the second, (i.e. if the intermediate results are used as well), it's no longer a reduction, but a scan. TODO: What computation is represented by only not following the third rule?
 
 The key observation here is that it's not that TVM is incapable of representing these patterns, but that to infer which _kind_ of reduction we need in our generated TVM code, we will have to do some additional analysis on the JSCoP by looking at all the reads and writes it has detected inside the SCoP, forming a dependence graph out of them, and seeing what constraints from above are satisfied/violated.
+
+### Detection of Pure reductions
+These are reductions where all three conditions are met. Detecting these is simple beacause Polly tells us of their existence through "reduction types" --- a non-null reduction type would mean polly detected a reduction and told us the reduction operator being used.
+
+### Detection of Scans
+These are reductions that violate the second condition. In these cases, polly does not tell us that an operation is a scan; hence, we must detect it ourselves by reconstructing the dependence graph from the JSCoP. Luckily, TVM provides some functionality to reconstruct dependency graphs as well, so our job is reduced to just verifying that they follow the required pattern.
