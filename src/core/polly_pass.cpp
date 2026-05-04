@@ -9,7 +9,6 @@
 
 // Polly headers
 #include "polly/ScopInfo.h"
-#include "polly/LinkAllPasses.h"
 #include <isl/ast.h>
 
 #include <utility>
@@ -274,6 +273,213 @@ namespace latensor
         }
     };
 
+    // ========================================================================
+    // Reduction / scan classification (Allen-Kennedy properties)
+    //
+    // Property 1 (reduction structure): the stmt has self-RAW + self-WAR +
+    //                                   self-WAW dependences.
+    // Property 2 (no leakage):           no outgoing RAW from this stmt to any
+    //                                   *other* stmt. Violation => scan.
+    // Property 3 (clean accumulator):    the RHS of the single write reads the
+    //                                   accumulator location exactly once.
+    //
+    // Classification:
+    //   prop1 false                       -> spatial
+    //   prop1 true,  prop3 false          -> ERROR (complicated reduction)
+    //   prop1 true,  prop3 true,  prop2 ok    -> reduction
+    //   prop1 true,  prop3 true,  prop2 violated -> scan
+    //
+    // Single-write constraint: stmts with multiple array writes are not
+    // analyzed; they fall back to spatial with a warning. Under this
+    // constraint AL_Statement deps are sufficient (the only write target IS
+    // the accumulator).
+    // ========================================================================
+
+    struct ClassifyResult
+    {
+        IterVarType stmt_type;          // spatial | reduction | scan
+        std::vector<unsigned> red_axes; // domain dim indices that carry the reduction/scan dependence
+    };
+
+    // Filter a union_map down to the (single) map whose source AND sink tuples
+    // both equal `name`. Returns null isl::map if no such map exists.
+    static isl::map extractSelfMap(const isl::union_map &UM, const std::string &name)
+    {
+        struct Ctx { std::string name; isl_map *result; };
+        Ctx ctx{name, nullptr};
+        isl_union_map_foreach_map(UM.get(),
+            [](isl_map *m, void *user) -> isl_stat {
+                auto *c = static_cast<Ctx *>(user);
+                const char *src = isl_map_get_tuple_name(m, isl_dim_in);
+                const char *snk = isl_map_get_tuple_name(m, isl_dim_out);
+                if (src && snk && c->name == src && c->name == snk) {
+                    if (c->result) isl_map_free(c->result);
+                    c->result = m;
+                } else {
+                    isl_map_free(m);
+                }
+                return isl_stat_ok;
+            }, &ctx);
+        return ctx.result ? isl::manage(ctx.result) : isl::map();
+    }
+
+    // True iff the union_map contains any map whose source tuple equals `name`
+    // and sink tuple does NOT equal `name` -- i.e., this stmt's accumulator is
+    // read by some other stmt.
+    static bool hasOutgoingDepToOther(const isl::union_map &UM, const std::string &name)
+    {
+        struct Ctx { std::string name; bool found; };
+        Ctx ctx{name, false};
+        isl_union_map_foreach_map(UM.get(),
+            [](isl_map *m, void *user) -> isl_stat {
+                auto *c = static_cast<Ctx *>(user);
+                const char *src = isl_map_get_tuple_name(m, isl_dim_in);
+                const char *snk = isl_map_get_tuple_name(m, isl_dim_out);
+                if (src && snk && c->name == src && c->name != snk)
+                    c->found = true;
+                isl_map_free(m);
+                return isl_stat_ok;
+            }, &ctx);
+        return ctx.found;
+    }
+
+    // Walk Val's expression tree; count LoadInsts whose Polly MemoryAccess has
+    // an access relation equal to WriteMA's (i.e., reads the accumulator cell).
+    static int countAccumLoads(llvm::Value *Val,
+                               polly::ScopStmt *Stmt,
+                               polly::MemoryAccess *WriteMA)
+    {
+        if (!Val) return 0;
+        if (auto *Load = llvm::dyn_cast<llvm::LoadInst>(Val)) {
+            for (polly::MemoryAccess *MA : *Stmt) {
+                if (MA->getAccessInstruction() == Load) {
+                    return MA->getAccessRelation().is_equal(WriteMA->getAccessRelation()) ? 1 : 0;
+                }
+            }
+            return 0;
+        }
+        if (auto *I = llvm::dyn_cast<llvm::Instruction>(Val)) {
+            int sum = 0;
+            for (unsigned i = 0; i < I->getNumOperands(); ++i)
+                sum += countAccumLoads(I->getOperand(i), Stmt, WriteMA);
+            return sum;
+        }
+        return 0; // constants, args, etc.
+    }
+
+    // For the stmt's self-RAW map, find which domain dimensions carry the
+    // dependence (i.e., the d-th delta is not pinned to zero). For matmul this
+    // returns {k}; for a scalar reduction over a 2D loop, returns {i, j}; for
+    // a prefix-sum scan over i, returns {i}.
+    static std::vector<unsigned> findCarrierAxes(const isl::map &selfRAW)
+    {
+        std::vector<unsigned> axes;
+        if (selfRAW.is_null()) return axes;
+
+        isl::set deltas = selfRAW.deltas();
+        unsigned n = isl_set_dim(deltas.get(), isl_dim_set);
+
+        for (unsigned d = 0; d < n; ++d) {
+            isl_set *proj = isl_set_copy(deltas.get());
+            if (n > d + 1)
+                proj = isl_set_project_out(proj, isl_dim_set, d + 1, n - d - 1);
+            if (d > 0)
+                proj = isl_set_project_out(proj, isl_dim_set, 0, d);
+
+            // proj is now 1-dim. Check whether it contains only the value 0.
+            isl_space *sp = isl_set_get_space(proj);
+            isl_local_space *ls = isl_local_space_from_space(sp);
+            isl_aff *a = isl_aff_var_on_domain(ls, isl_dim_set, 0);
+            isl_constraint *c = isl_equality_from_aff(a);
+            isl_basic_set *bs = isl_basic_set_universe(isl_set_get_space(proj));
+            bs = isl_basic_set_add_constraint(bs, c);
+            isl_set *zeroSet = isl_set_from_basic_set(bs);
+            isl_bool isAllZero = isl_set_is_subset(proj, zeroSet);
+            isl_set_free(zeroSet);
+            isl_set_free(proj);
+
+            if (isAllZero != isl_bool_true)
+                axes.push_back(d);
+        }
+        return axes;
+    }
+
+    static ClassifyResult classifyStmt(polly::ScopStmt &Stmt,
+                                       const polly::Dependences &Deps)
+    {
+        ClassifyResult R{spatial, {}};
+
+        // Find the single array-kind write. Note Polly's own reduction hint
+        // for cross-checking.
+        polly::MemoryAccess *WriteMA = nullptr;
+        int writeCount = 0;
+        bool pollyReductionLike = false;
+        for (polly::MemoryAccess *MA : Stmt) {
+            if (!MA->isArrayKind()) continue;
+            if (MA->isWrite()) { WriteMA = MA; writeCount++; }
+            if (MA->isReductionLike()) pollyReductionLike = true;
+        }
+        const char *raw_name = isl_set_get_tuple_name(Stmt.getDomain().get());
+        std::string name = raw_name ? raw_name : "";
+
+        if (writeCount != 1) {
+            errs() << "      [classifyStmt] " << name
+                   << ": " << writeCount << " array writes -- classifying as spatial\n";
+            return R;
+        }
+
+        // Property 1: self-{RAW, WAR, WAW}.
+        isl::union_map raw = Deps.getDependences(polly::Dependences::TYPE_RAW);
+        isl::union_map war = Deps.getDependences(polly::Dependences::TYPE_WAR);
+        isl::union_map waw = Deps.getDependences(polly::Dependences::TYPE_WAW);
+        isl::map selfRAW = extractSelfMap(raw, name);
+        isl::map selfWAR = extractSelfMap(war, name);
+        isl::map selfWAW = extractSelfMap(waw, name);
+        bool prop1 = !selfRAW.is_null() && !selfWAR.is_null() && !selfWAW.is_null();
+
+        // Sanity-check Polly's own detector. Disagreement is a warning, not an
+        // error: Polly's isReductionLike is conservative and known to miss
+        // matmul-style += patterns.
+        if (pollyReductionLike != prop1) {
+            errs() << "      [classifyStmt] " << name
+                   << ": Polly reductionLike=" << pollyReductionLike
+                   << " disagrees with prop1=" << prop1
+                   << " (using our analysis)\n";
+        }
+
+        if (!prop1) return R; // spatial
+
+        // Property 3: exactly one read of the accumulator location in the RHS.
+        auto *StoreI = llvm::dyn_cast<llvm::StoreInst>(WriteMA->getAccessInstruction());
+        if (!StoreI) {
+            errs() << "      [classifyStmt] " << name
+                   << ": write is not a StoreInst -- classifying as spatial\n";
+            return R;
+        }
+        int accumLoads = countAccumLoads(StoreI->getValueOperand(), &Stmt, WriteMA);
+        if (accumLoads != 1) {
+            throw std::runtime_error("LaTensor: Failed to process " + name +
+                ": complicated reduction (accumulator read " +
+                std::to_string(accumLoads) + " times in RHS, expected 1)");
+        }
+
+        // Carrying axes from the self-RAW deltas.
+        R.red_axes = findCarrierAxes(selfRAW);
+
+        // Property 2: outgoing RAW to another stmt => scan.
+        if (hasOutgoingDepToOther(raw, name)) {
+            if (R.red_axes.size() != 1) {
+                errs() << "      [classifyStmt] " << name
+                       << ": scan with " << R.red_axes.size()
+                       << " carrying axes -- outside scalar-accumulator assumption\n";
+            }
+            R.stmt_type = scan;
+        } else {
+            R.stmt_type = reduction;
+        }
+        return R;
+    }
+
     // 1. Inherit from PassInfoMixin instead of FunctionPass
     struct MyPollyScopPass : public PassInfoMixin<MyPollyScopPass>
     {
@@ -326,46 +532,42 @@ namespace latensor
                 // 3. Extract the actual ISL union_map for the True (RAW) dependencies
                 isl::union_map TrueDeps = Deps.getDependences(polly::Dependences::TYPE_RAW);
 
-                std::map<polly::ScopStmt *, IterVarType> stmt_types{};
+                std::map<polly::ScopStmt *, ClassifyResult> stmt_classification{};
 
                 for (polly::ScopStmt &Stmt: *S)
                 {
-                    IterVarType current_stmt_type = spatial;
-
                     errs() << "    Stmt: " << Stmt.getBaseName() << "\n";
 
                     isl::set Domain = Stmt.getDomain();
                     char *DomainStr = isl_set_to_str(Domain.get());
                     errs() << "      Loop Bounds (Domain): " << DomainStr << "\n";
-                    free(DomainStr); // You must free the C-string!
+                    free(DomainStr);
 
                     for (Instruction *I: Stmt.getInstructions())
-                    {
                         errs() << "      Inst: " << *I << "\n";
-                    }
 
-                    for (polly::MemoryAccess *MA: Stmt)
-                    {
+                    for (polly::MemoryAccess *MA: Stmt) {
                         errs() << "      MemAccess: ";
                         MA->print(errs());
                         errs() << "\n";
+                    }
 
-                        if (MA->isReductionLike())
-                        {
-                            current_stmt_type = reduction;
+                    try {
+                        ClassifyResult cr = classifyStmt(Stmt, Deps);
+                        stmt_classification[&Stmt] = cr;
+                        const char *kind = (cr.stmt_type == scan) ? "scan"
+                                         : (cr.stmt_type == reduction) ? "reduction"
+                                         : "spatial";
+                        errs() << "      => " << kind;
+                        if (!cr.red_axes.empty()) {
+                            errs() << ", carrying dims [";
+                            for (size_t i = 0; i < cr.red_axes.size(); ++i)
+                                errs() << (i ? ", " : "") << cr.red_axes[i];
+                            errs() << "]";
                         }
-
-                        if (MA->isWrite())
-                        {
-                            Instruction *StoreI = MA->getAccessInstruction();
-                            errs() << "        Write: " << *StoreI << "\n";
-
-                            if (auto *StoreOp = dyn_cast<StoreInst>(StoreI))
-                            {
-                                Value *RHS = StoreOp->getValueOperand();
-                                errs() << "        RHS: " << *RHS << "\n";
-                            }
-                        }
+                        errs() << "\n";
+                    } catch (const std::runtime_error &e) {
+                        errs() << "      ERROR: " << e.what() << "\n";
                     }
                 }
 
