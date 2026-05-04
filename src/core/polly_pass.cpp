@@ -75,14 +75,202 @@ namespace latensor
         }
     };
 
+    struct MemoryAccessInfo
+    {
+        std::string array_name;
+        std::string access_str; // e.g., "128*i0 + i1"
+        bool is_read;
+        bool is_write;
+    };
+
+    struct TVMComputeStmt
+    {
+        std::string lhs; // e.g., "C[vi, vj]"
+        std::string rhs; // e.g., "A[vi, vk] * B[vk, vj]"
+    };
+
+    std::string buildMathematicalAccess(polly::MemoryAccess *MA) {
+        // 1. Get the Array Name (e.g., "MemRef1")
+        std::string array_name = MA->getScopArrayInfo()->getName();
+
+        // 2. Get the access relation and convert it to a piecewise multi-affine expression
+        isl::map access_map = MA->getAccessRelation();
+        isl::pw_multi_aff pma = isl::pw_multi_aff::from_map(access_map);
+
+        // Release to the C API for deep inspection
+        isl_pw_multi_aff *pma_c = pma.release();
+        std::string index_expr = "";
+
+        // An access might theoretically have multiple piecewise conditions (e.g., if/else inside loop)
+        // For standard loops, there is only one piece. We extract it using a callback:
+        isl_multi_aff *ma = nullptr;
+        isl_pw_multi_aff_foreach_piece(pma_c, [](isl_set *set, isl_multi_aff *m_aff, void *user) -> isl_stat {
+            isl_multi_aff **ma_ptr = static_cast<isl_multi_aff **>(user);
+            if (!*ma_ptr) {
+                *ma_ptr = isl_multi_aff_copy(m_aff); // Copy the first math piece we find
+            }
+            isl_set_free(set);
+            isl_multi_aff_free(m_aff);
+            return isl_stat_ok;
+        }, &ma);
+
+        if (ma) {
+            // We want the math for the 1st dimension of the array access (Index 0)
+            // E.g., for MemRef1[128 * i0 + i1], this gets the (128 * i0 + i1) expression
+            isl_aff *aff = isl_multi_aff_get_aff(ma, 0);
+
+            // How many loop iterators (i0, i1, i2) does this math use?
+            int num_in_dims = isl_aff_dim(aff, isl_dim_in);
+
+            bool is_first = true;
+
+            // 3. EXTRACT THE COEFFICIENTS (e.g., the '128' in 128*vi0)
+            for (int i = 0; i < num_in_dims; ++i) {
+                // Get the integer multiplier for dimension 'i'
+                isl_val *coef_val = isl_aff_get_coefficient_val(aff, isl_dim_in, i);
+                long coef = isl_val_get_num_si(coef_val);
+                isl_val_free(coef_val);
+
+                if (coef != 0) {
+                    if (!is_first) index_expr += " + ";
+
+                    if (coef == 1) {
+                        index_expr += "vi" + std::to_string(i);
+                    } else {
+                        index_expr += std::to_string(coef) + " * vi" + std::to_string(i);
+                    }
+                    is_first = false;
+
+                    // NOTE: If you are populating your IterVarInfo struct,
+                    // you would do `my_iter_info.linear_combination.push_back({vi_ptr, coef});` here!
+                }
+            }
+
+            // 4. EXTRACT THE CONSTANT (e.g., the '7' in vi0 + 7)
+            isl_val *const_val = isl_aff_get_constant_val(aff);
+            long const_term = isl_val_get_num_si(const_val);
+            isl_val_free(const_val);
+
+            if (const_term != 0) {
+                if (!is_first) index_expr += " + ";
+                index_expr += std::to_string(const_term);
+
+                // NOTE: `my_iter_info.added_const = const_term;`
+            }
+
+            if (index_expr.empty()) index_expr = "0";
+
+            isl_aff_free(aff);
+            isl_multi_aff_free(ma);
+        }
+
+        isl_pw_multi_aff_free(pma_c);
+
+        return array_name + "[" + index_expr + "]";
+    }
+
+
+    // Helper to recursively reconstruct the math expression
+    std::string buildComputeMath(llvm::Value *Val, polly::ScopStmt *Stmt)
+    {
+        // 1. Is it a Load? (Base case)
+        if (auto *Load = llvm::dyn_cast<llvm::LoadInst>(Val))
+        {
+            // Find which Polly MemoryAccess corresponds to this load
+            for (polly::MemoryAccess *MA: *Stmt)
+            {
+                if (MA->getAccessInstruction() == Load)
+                {
+                    return buildMathematicalAccess(MA); // Replace with actual index
+                }
+            }
+            return "UnknownLoad";
+        }
+
+        // 2. Is it a mathematical operation? (Recursive case)
+        if (auto *BinOp = llvm::dyn_cast<llvm::BinaryOperator>(Val))
+        {
+            std::string op = "";
+            switch (BinOp->getOpcode())
+            {
+                case llvm::Instruction::FAdd:
+                    op = " + ";
+                    break;
+                case llvm::Instruction::FMul:
+                    op = " * ";
+                    break;
+                    // add other operations as needed...
+            }
+
+            std::string left = buildComputeMath(BinOp->getOperand(0), Stmt);
+            std::string right = buildComputeMath(BinOp->getOperand(1), Stmt);
+            return "(" + left + op + right + ")";
+        }
+
+        // 3. Is it a Constant?
+        if (auto *ConstFP = llvm::dyn_cast<llvm::ConstantFP>(Val))
+        {
+            return std::to_string(ConstFP->getValueAPF().convertToFloat());
+        }
+
+        return "UnsupportedValue";
+    }
+
     struct BlockInfo : TreeNode
     {
         std::vector<IterVarInfo> iter_vars;
         std::vector<Stmt> stmts;
+        std::vector<MemoryAccessInfo> mem_accesses;
+        std::vector<TVMComputeStmt> compute_stmts;
 
         explicit BlockInfo(polly::ScopStmt *Stmt)
         {
+            for (polly::MemoryAccess *MA: *Stmt)
+            {
+                // Skip scalar/register dependencies for TVM buffer mappings
+                if (!MA->isArrayKind()) continue;
 
+                MemoryAccessInfo mem_info;
+                mem_info.array_name = MA->getScopArrayInfo()->getName();
+                mem_info.is_read = MA->isRead();
+                mem_info.is_write = MA->isWrite();
+
+                // Get the mathematical index mapping (e.g., { Stmt[i,j] -> MemRef_A[128i + j] })
+                isl::map access_map = MA->getAccessRelation();
+
+                // To cleanly translate this to TVM, you extract the output dimension math.
+                // A quick hack for prototyping is converting it to a C string:
+                // In production, you'd use isl_pw_multi_aff to map this directly to TVM TIR nodes.
+                isl::pw_multi_aff pma = isl::pw_multi_aff::from_map(access_map);
+                mem_info.access_str = buildMathematicalAccess(MA);
+                errs() << "aaaaaaaaaa " << mem_info.array_name << " " << mem_info.is_read << " "
+                       << mem_info.is_write << " " << mem_info.access_str << "\n";
+
+                this->mem_accesses.push_back(mem_info);
+            }
+
+            for (polly::MemoryAccess *MA: *Stmt)
+            {
+                if (MA->isWrite() && MA->isArrayKind())
+                {
+                    llvm::Instruction *StoreI = MA->getAccessInstruction();
+                    if (auto *StoreOp = llvm::dyn_cast<llvm::StoreInst>(StoreI))
+                    {
+                        TVMComputeStmt compute;
+
+                        // LHS: The array we are writing to
+                        compute.lhs = buildMathematicalAccess(MA);
+
+                        // RHS: Recursively build the math expression starting from the value being stored
+                        llvm::Value *RHS_Value = StoreOp->getValueOperand();
+                        compute.rhs = buildComputeMath(RHS_Value, Stmt);
+
+                        this->compute_stmts.push_back(compute);
+
+                        llvm::errs() << "Extracted Compute: " << compute.lhs << " = " << compute.rhs << "\n";
+                    }
+                }
+            }
         }
     };
 
@@ -189,7 +377,8 @@ namespace latensor
         }
 
         // The main recursive walker
-        std::vector<std::shared_ptr<TreeNode>> walkAST(isl::ast_node Node, std::vector<std::shared_ptr<LoopInfo>> loop_backtrace)
+        std::vector<std::shared_ptr<TreeNode>>
+        walkAST(isl::ast_node Node, std::vector<std::shared_ptr<LoopInfo>> loop_backtrace)
         {
             std::vector<std::shared_ptr<TreeNode>> result;
 
@@ -217,7 +406,7 @@ namespace latensor
                 result.push_back(current_loop);
             }
 
-            // 2. IS THIS A BLOCK (SIDE-BY-SIDE SIBLINGS)?
+                // 2. IS THIS A BLOCK (SIDE-BY-SIDE SIBLINGS)?
             else if (isl_ast_node_get_type(Node.get()) == isl_ast_node_block)
             {
                 isl::ast_node_list List = isl::manage(isl_ast_node_block_get_children(Node.get()));
@@ -237,7 +426,7 @@ namespace latensor
                 }
             }
 
-            // 3. IS THIS A COMPUTATION NODE (SCOPSTMT)?
+                // 3. IS THIS A COMPUTATION NODE (SCOPSTMT)?
             else if (isl_ast_node_get_type(Node.get()) == isl_ast_node_user)
             {
                 // --- THE POLLY MAGIC TRICK ---
@@ -256,7 +445,7 @@ namespace latensor
                 errs() << "a block!\n";
                 errs() << *Stmt << "\n";
 
-                for (const std::shared_ptr<LoopInfo>& li : loop_backtrace)
+                for (const std::shared_ptr<LoopInfo> &li: loop_backtrace)
                 {
                     IterVarInfo thing = IterVarInfo(li);
                     leaf->iter_vars.emplace_back(thing);
@@ -265,7 +454,7 @@ namespace latensor
                 result.push_back(leaf);
             }
 
-            // 4. IS THIS A MARK NODE (METADATA)?
+                // 4. IS THIS A MARK NODE (METADATA)?
             else if (isl_ast_node_get_type(Node.get()) == isl_ast_node_mark)
             {
                 // Optional: You can extract the mark's name to see what optimization
@@ -285,7 +474,7 @@ namespace latensor
         }
 
         // Returns true if ast node has nice lower/upper bounds, and populates the treeNode values.
-        static bool get_loop_bound(isl::ast_node &Node, const std::shared_ptr<LoopInfo>& tree_node)
+        static bool get_loop_bound(isl::ast_node &Node, const std::shared_ptr<LoopInfo> &tree_node)
         {
             long lower = 0;
             long upper = 0;
@@ -293,11 +482,14 @@ namespace latensor
             // 1. EXTRACT THE LOWER BOUND (Init)
             isl::ast_expr init_expr = isl::manage(isl_ast_node_for_get_init(Node.get()));
 
-            if (isl_ast_expr_get_type(init_expr.get()) == isl_ast_expr_int) {
+            if (isl_ast_expr_get_type(init_expr.get()) == isl_ast_expr_int)
+            {
                 // It's a pure integer! Extract it.
                 isl::val init_val = isl::manage(isl_ast_expr_get_val(init_expr.get()));
                 lower = isl_val_get_num_si(init_val.get());
-            } else {
+            }
+            else
+            {
                 // It might be a variable or math expression (e.g., 'N' or 'N + 1')
                 return false;
             }
@@ -306,26 +498,27 @@ namespace latensor
             // The condition is usually a binary operation like (c0 <= 127)
             isl::ast_expr cond_expr = isl::manage(isl_ast_node_for_get_cond(Node.get()));
 
-            if (isl_ast_expr_get_type(cond_expr.get()) == isl_ast_expr_op) {
+            if (isl_ast_expr_get_type(cond_expr.get()) == isl_ast_expr_op)
+            {
                 // We expect an operator like '<' or '<='.
                 // Argument 0 is the iterator (c0). Argument 1 is the limit (127).
                 isl::ast_expr ub_expr = isl::manage(isl_ast_expr_get_op_arg(cond_expr.get(), 1));
 
-                if (isl_ast_expr_get_type(ub_expr.get()) == isl_ast_expr_int) {
+                if (isl_ast_expr_get_type(ub_expr.get()) == isl_ast_expr_int)
+                {
                     // The right hand side of the condition is a pure integer!
                     isl::val ub_val = isl::manage(isl_ast_expr_get_val(ub_expr.get()));
                     upper = isl_val_get_num_si(ub_val.get());
 
                     // Check if the operator was '<' or '<=' to know the exact range
                     enum isl_ast_op_type op_type = isl_ast_expr_get_op_type(cond_expr.get());
-                    if (op_type == isl_ast_op_le) {
+                    if (op_type == isl_ast_op_le)
                         upper++;
-                    } else if (op_type != isl_ast_op_lt) {
+                    else if (op_type != isl_ast_op_lt)
                         return false;
-                    }
-                } else {
-                    return false;
                 }
+                else
+                    return false;
             }
 
             tree_node->lower_bound = lower;
@@ -333,7 +526,7 @@ namespace latensor
             return true;
         }
     };
-} // end anonymous namespace
+} // end namespace
 
 extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo
 llvmGetPassPluginInfo()
