@@ -9,7 +9,6 @@
 
 // Polly headers
 #include "polly/ScopInfo.h"
-#include "polly/LinkAllPasses.h"
 #include <isl/ast.h>
 
 #include <utility>
@@ -29,17 +28,45 @@ namespace latensor
         scan
     };
 
-    struct Stmt
+    struct TreeNode
     {
+        virtual std::string to_string() = 0;
     };
 
-    struct TreeNode { };
+    std::string indent_lines(const std::string& input)
+    {
+        std::string out;
+        out.reserve(input.size() + 4 * 10);
+
+        out += "    ";
+        for (int i = 0; i < input.length(); i++)
+        {
+            char c = input[i];
+            out += c;
+            if (c == '\n' && i < input.length() - 1)
+            {
+                out += "    ";
+            }
+        }
+        return out;
+    }
 
     struct LoopInfo : TreeNode
     {
+        std::string name;
         long lower_bound;
         long upper_bound;
         std::vector<std::shared_ptr<TreeNode>> children {};
+
+        std::string to_string()
+        {
+            std::string s = "for " + name + " in T.serial(" + std::to_string(lower_bound) + ", " + std::to_string(upper_bound - lower_bound) + "):\n";
+            for (const auto& child : children)
+            {
+                s += indent_lines(child->to_string());
+            }
+            return s;
+        }
     };
 
     // for example, 2i
@@ -55,6 +82,11 @@ namespace latensor
             this->loop_var = std::move(loop_var);
             this->multiplier = mul;
         }
+
+        std::string to_string()
+        {
+            return std::to_string(multiplier) + " * " + loop_var->name;
+        }
     };
 
     // For iter var referencing loops i, j as 2i + 3j + 7 we have:
@@ -66,12 +98,42 @@ namespace latensor
         int added_const;
         IterVarType type;
 
+        long extent;
+        std::string name;
+
         // Default constructor, always sets linear combination to loop_var * 1 + 0
-        IterVarInfo(std::shared_ptr<LoopInfo> loop_var)
+        IterVarInfo(std::shared_ptr<LoopInfo> loop_var, int num)
         {
+            this->extent = loop_var->upper_bound - loop_var->lower_bound;
+            this->name = "vi" + std::to_string(num);
             this->linear_combination.emplace_back(AxisMultiplier(std::move(loop_var), 1));
             this->added_const = 0;
             this->type = spatial;
+        }
+
+        std::string to_string()
+        {
+            std::string t;
+            switch (this->type)
+            {
+                case spatial:
+                    t = "spatial";
+                    break;
+                case reduction:
+                    t = "reduce";
+                    break;
+                case scan:
+                    t = "scan";
+                    break;
+            }
+
+            std::string ac = std::to_string(this->added_const);
+            for (AxisMultiplier &am: linear_combination)
+            {
+                ac += " + " + am.to_string();
+            }
+
+            return name + " = T.axis." + t + "(" + std::to_string(extent) + ", " + ac + ")";
         }
     };
 
@@ -180,9 +242,7 @@ namespace latensor
             for (polly::MemoryAccess *MA: *Stmt)
             {
                 if (MA->getAccessInstruction() == Load)
-                {
                     return buildMathematicalAccess(MA); // Replace with actual index
-                }
             }
             return "UnknownLoad";
         }
@@ -199,7 +259,7 @@ namespace latensor
                 case llvm::Instruction::FMul:
                     op = " * ";
                     break;
-                    // add other operations as needed...
+                    // todo add other operations as needed...
             }
 
             std::string left = buildComputeMath(BinOp->getOperand(0), Stmt);
@@ -209,22 +269,22 @@ namespace latensor
 
         // 3. Is it a Constant?
         if (auto *ConstFP = llvm::dyn_cast<llvm::ConstantFP>(Val))
-        {
             return std::to_string(ConstFP->getValueAPF().convertToFloat());
-        }
 
         return "UnsupportedValue";
     }
 
     struct BlockInfo : TreeNode
     {
+        std::string name;
         std::vector<IterVarInfo> iter_vars;
-        std::vector<Stmt> stmts;
-        std::vector<MemoryAccessInfo> mem_accesses;
+        std::vector<MemoryAccessInfo> reads;
+        std::vector<MemoryAccessInfo> writes;
         std::vector<TVMComputeStmt> compute_stmts;
 
         explicit BlockInfo(polly::ScopStmt *Stmt)
         {
+            this->name = Stmt->getBaseName();
             for (polly::MemoryAccess *MA: *Stmt)
             {
                 // Skip scalar/register dependencies for TVM buffer mappings
@@ -238,15 +298,13 @@ namespace latensor
                 // Get the mathematical index mapping (e.g., { Stmt[i,j] -> MemRef_A[128i + j] })
                 isl::map access_map = MA->getAccessRelation();
 
-                // To cleanly translate this to TVM, you extract the output dimension math.
-                // A quick hack for prototyping is converting it to a C string:
-                // In production, you'd use isl_pw_multi_aff to map this directly to TVM TIR nodes.
                 isl::pw_multi_aff pma = isl::pw_multi_aff::from_map(access_map);
                 mem_info.access_str = buildMathematicalAccess(MA);
-                errs() << "aaaaaaaaaa " << mem_info.array_name << " " << mem_info.is_read << " "
-                       << mem_info.is_write << " " << mem_info.access_str << "\n";
 
-                this->mem_accesses.push_back(mem_info);
+                if (mem_info.is_read)
+                    this->reads.push_back(mem_info);
+                if (mem_info.is_write)
+                    this->writes.push_back(mem_info);
             }
 
             for (polly::MemoryAccess *MA: *Stmt)
@@ -271,6 +329,35 @@ namespace latensor
                     }
                 }
             }
+        }
+
+        std::string to_string()
+        {
+            std::string s = "with T.block(\"" + this->name + "\"):\n";
+            for (auto iv: iter_vars)
+            {
+                s += "    " + iv.to_string() + "\n";
+            }
+            s += "    T.reads(";
+            for (int i = 0; i < this->reads.size(); i++)
+            {
+                if (i > 0)
+                    s += ", ";
+                s += this->reads[i].access_str;
+            }
+            s += ")\n    T.writes(";
+            for (int i = 0; i < this->writes.size(); i++)
+            {
+                if (i > 0)
+                    s += ", ";
+                s += this->writes[i].access_str;
+            }
+            s += ")\n";
+            for (const auto& st: this->compute_stmts)
+            {
+                s += "    " + st.lhs + " = " + st.rhs + "\n";
+            }
+            return s;
         }
     };
 
@@ -314,6 +401,7 @@ namespace latensor
 
                 // 2. Build the entire tree of LoopInfos and BlockInfos!
                 std::vector<std::shared_ptr<TreeNode>> LoopTree = walkAST(RootNode, {});
+                errs() << "TVM CODE IS:\n" << LoopTree[0]->to_string() + "";
 
                 // Now LoopTree contains your fully structured, nested hierarchy.
 
@@ -377,8 +465,7 @@ namespace latensor
         }
 
         // The main recursive walker
-        std::vector<std::shared_ptr<TreeNode>>
-        walkAST(isl::ast_node Node, std::vector<std::shared_ptr<LoopInfo>> loop_backtrace)
+        std::vector<std::shared_ptr<TreeNode>> walkAST(isl::ast_node Node, std::vector<std::shared_ptr<LoopInfo>> loop_backtrace)
         {
             std::vector<std::shared_ptr<TreeNode>> result;
 
@@ -426,7 +513,7 @@ namespace latensor
                 }
             }
 
-                // 3. IS THIS A COMPUTATION NODE (SCOPSTMT)?
+            // 3. IS THIS A COMPUTATION NODE (SCOPSTMT)?
             else if (isl_ast_node_get_type(Node.get()) == isl_ast_node_user)
             {
                 // --- THE POLLY MAGIC TRICK ---
@@ -445,10 +532,12 @@ namespace latensor
                 errs() << "a block!\n";
                 errs() << *Stmt << "\n";
 
+                int i = 0;
                 for (const std::shared_ptr<LoopInfo> &li: loop_backtrace)
                 {
-                    IterVarInfo thing = IterVarInfo(li);
+                    IterVarInfo thing = IterVarInfo(li, i);
                     leaf->iter_vars.emplace_back(thing);
+                    i++;
                 }
 
                 result.push_back(leaf);
@@ -520,6 +609,17 @@ namespace latensor
                 else
                     return false;
             }
+
+            // 3. EXTRACT THE LOOP VARIABLE NAME (Iterator)
+            // Get the iterator expression from the for loop
+            isl::ast_expr iter_expr = isl::manage(isl_ast_node_for_get_iterator(Node.get()));
+
+            // Extract the ID object from the expression
+            isl::id iter_id = isl::manage(isl_ast_expr_get_id(iter_expr.get()));
+
+            // Extract the actual C string name from the ID
+            std::string iter_name = isl_id_get_name(iter_id.get());
+            tree_node->name = iter_name;
 
             tree_node->lower_bound = lower;
             tree_node->upper_bound = upper;

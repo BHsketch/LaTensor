@@ -2,9 +2,6 @@ extern "C" void matmul_naive(const float* __restrict A, const float* __restrict 
     N = 128;
     for (int i = 0; i < N; i++) {
         for (int j = 0; j < N; j++) {
-            for (int k1 = 0; k1 < N; k1++) {
-                C[i * N + j] += 5;
-            }
             for (int k2 = 0; k2 < N; k2++) {
                 C[i * N + j] += A[i * N + k2] * B[k2 * N + j];
             }
