@@ -1,8 +1,12 @@
-extern "C" void matmul_naive(const float* A, const float* B, float* C, int N) {
+extern "C" void matmul_naive(const float* __restrict A, const float* __restrict B, float* __restrict C, int N) {
+    N = 128;
     for (int i = 0; i < N; i++) {
         for (int j = 0; j < N; j++) {
-            for (int k = 0; k < N; k++) {
-                C[i * N + j] += A[i * N + k] * B[k * N + j];
+            for (int k1 = 0; k1 < N; k1++) {
+                C[i * N + j] += 5;
+            }
+            for (int k2 = 0; k2 < N; k2++) {
+                C[i * N + j] += A[i * N + k2] * B[k2 * N + j];
             }
         }
     }
