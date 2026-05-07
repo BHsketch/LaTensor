@@ -444,7 +444,11 @@ namespace latensor
             errs() << "      [classifyStmt] " << name
                    << ": Polly reductionLike=" << pollyReductionLike
                    << " disagrees with prop1=" << prop1
-                   << " (using our analysis)\n";
+                   << " (using our analysis)\n"
+				   << "we can see (bool): \n"
+				   << "RAW: " << !selfRAW.is_null() 
+				   << ", WAR: " << !selfWAR.is_null() 
+				   << ", WAW: " << !selfWAW.is_null();
         }
 
         if (!prop1) return R; // spatial
