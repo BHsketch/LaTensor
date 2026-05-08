@@ -553,6 +553,9 @@ namespace latensor
 			std::string name = raw_name ? raw_name : "";
 
 			// Collect every write we'll consider (arrays + scalar accumulators).
+			// if we have a computation such as A[i] = A[i] + B[j], then
+			// a "MemoryAccess" is basically one single "A[i]" or "B[j]" from this 
+			// computation
 			std::vector<polly::MemoryAccess *> writes;
 			bool pollyReductionLike = false;
 			for (polly::MemoryAccess *MA : Stmt) {
