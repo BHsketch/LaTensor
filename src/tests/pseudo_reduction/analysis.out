@@ -1,0 +1,155 @@
+Function: pseudo_reduction
+  SCoP: %for.body---%for.end
+loop begin
+{ iterator: { id: c0 }, init: { val: 0 }, cond: { op: le, args: [ { id: c0 }, { val: 126 } ] }, inc: { val: 1 }, body: [ { user: { op: call, args: [ { id: Stmt0@0x5f9cc3bf3990 }, { id: c0 } ] } }, { user: { op: call, args: [ { id: Stmt0b@0x5f9cc3bf4770 }, { id: c0 } ] } }, { user: { op: call, args: [ { id: Stmt0c@0x5f9cc3bf4960 }, { id: c0 } ] } } ] }
+siblings begin
+aaaaaaaaaa MemRef0 1 0 MemRef0[vi0]
+aaaaaaaaaa MemRef1 0 1 MemRef1[0]
+Extracted Compute: MemRef1[0] = UnsupportedValue
+a block!
+	Stmt0
+            Domain :=
+                { Stmt0[i0] : 0 <= i0 <= 126 };
+            Schedule :=
+                { Stmt0[i0] -> [i0, 0] };
+            ReadAccess :=	[Reduction Type: NONE] [Scalar: 0]
+                { Stmt0[i0] -> MemRef0[i0] };
+            MustWriteAccess :=	[Reduction Type: NONE] [Scalar: 0]
+                { Stmt0[i0] -> MemRef1[0] };
+
+siblings end
+siblings begin
+aaaaaaaaaa MemRef0 1 0 MemRef0[vi0 + 1]
+aaaaaaaaaa MemRef1 1 0 MemRef1[0]
+aaaaaaaaaa MemRef1 0 1 MemRef1[0]
+Extracted Compute: MemRef1[0] = (MemRef1[0] + UnsupportedValue)
+a block!
+	Stmt0b
+            Domain :=
+                { Stmt0b[i0] : 0 <= i0 <= 126 };
+            Schedule :=
+                { Stmt0b[i0] -> [i0, 1] };
+            ReadAccess :=	[Reduction Type: NONE] [Scalar: 0]
+                { Stmt0b[i0] -> MemRef0[1 + i0] };
+            ReadAccess :=	[Reduction Type: +] [Scalar: 0]
+                { Stmt0b[i0] -> MemRef1[0] };
+            MustWriteAccess :=	[Reduction Type: +] [Scalar: 0]
+                { Stmt0b[i0] -> MemRef1[0] };
+
+siblings end
+siblings begin
+aaaaaaaaaa MemRef1 1 0 MemRef1[0]
+aaaaaaaaaa MemRef2 0 1 MemRef2[vi0]
+Extracted Compute: MemRef2[vi0] = UnsupportedValue
+a block!
+	Stmt0c
+            Domain :=
+                { Stmt0c[i0] : 0 <= i0 <= 126 };
+            Schedule :=
+                { Stmt0c[i0] -> [i0, 2] };
+            ReadAccess :=	[Reduction Type: NONE] [Scalar: 0]
+                { Stmt0c[i0] -> MemRef1[0] };
+            MustWriteAccess :=	[Reduction Type: NONE] [Scalar: 0]
+                { Stmt0c[i0] -> MemRef2[i0] };
+
+siblings end
+loop end
+    Stmt: Stmt0
+      Loop Bounds (Domain): { Stmt0[i0] : 0 <= i0 <= 126 }
+      Inst:   %0 = load float, ptr %arrayidx, align 4
+      Inst:   %conv = fpext fast float %0 to double
+      Inst:   store double %conv, ptr %arrayidx1, align 8
+      MemAccess:             ReadAccess :=	[Reduction Type: NONE] [Scalar: 0]
+                { Stmt0[i0] -> MemRef0[i0] };
+
+      MemAccess:             MustWriteAccess :=	[Reduction Type: NONE] [Scalar: 0]
+                { Stmt0[i0] -> MemRef1[0] };
+
+      => write @ 0x5f9cc3bf2680: spatial
+    Stmt: Stmt0b
+      Loop Bounds (Domain): { Stmt0b[i0] : 0 <= i0 <= 126 }
+      Inst:   %1 = load float, ptr %arrayidx3, align 4
+      Inst:   %conv4 = fpext fast float %1 to double
+      Inst:   %2 = load double, ptr %arrayidx5, align 8
+      Inst:   %add6 = fadd fast double %2, %conv4
+      Inst:   store double %add6, ptr %arrayidx5, align 8
+      MemAccess:             ReadAccess :=	[Reduction Type: NONE] [Scalar: 0]
+                { Stmt0b[i0] -> MemRef0[1 + i0] };
+
+      MemAccess:             ReadAccess :=	[Reduction Type: +] [Scalar: 0]
+                { Stmt0b[i0] -> MemRef1[0] };
+
+      MemAccess:             MustWriteAccess :=	[Reduction Type: +] [Scalar: 0]
+                { Stmt0b[i0] -> MemRef1[0] };
+
+      [classifyStmt] Stmt0b (write @ 0x5f9cc3bf2b80): Polly reductionLike=1 disagrees with prop1=0 (using our analysis)
+        RAW=0 WAR=0 WAW=0 RED=0
+      => write @ 0x5f9cc3bf2b80: spatial
+    Stmt: Stmt0c
+      Loop Bounds (Domain): { Stmt0c[i0] : 0 <= i0 <= 126 }
+      Inst:   %3 = load double, ptr %arrayidx7, align 8
+      Inst:   %conv8 = fptrunc fast double %3 to float
+      Inst:   store float %conv8, ptr %arrayidx10, align 4
+      MemAccess:             ReadAccess :=	[Reduction Type: NONE] [Scalar: 0]
+                { Stmt0c[i0] -> MemRef1[0] };
+
+      MemAccess:             MustWriteAccess :=	[Reduction Type: NONE] [Scalar: 0]
+                { Stmt0c[i0] -> MemRef2[i0] };
+
+      => write @ 0x5f9cc3bf3330: spatial
+    Function: pseudo_reduction
+    Region: %for.body---%for.end
+    Max Loop Depth:  1
+    Invariant Accesses: {
+    }
+    Context:
+    {  :  }
+    Assumed Context:
+    {  :  }
+    Invalid Context:
+    {  : false }
+    Defined Behavior Context:
+    {  :  }
+    Arrays {
+        float MemRef0[*]; // Element size 4
+        double MemRef1[*]; // Element size 8
+        float MemRef2[*]; // Element size 4
+    }
+    Arrays (Bounds as pw_affs) {
+        float MemRef0[*]; // Element size 4
+        double MemRef1[*]; // Element size 8
+        float MemRef2[*]; // Element size 4
+    }
+    Alias Groups (0):
+        n/a
+    Statements {
+    	Stmt0
+            Domain :=
+                { Stmt0[i0] : 0 <= i0 <= 126 };
+            Schedule :=
+                { Stmt0[i0] -> [i0, 0] };
+            ReadAccess :=	[Reduction Type: NONE] [Scalar: 0]
+                { Stmt0[i0] -> MemRef0[i0] };
+            MustWriteAccess :=	[Reduction Type: NONE] [Scalar: 0]
+                { Stmt0[i0] -> MemRef1[0] };
+    	Stmt0b
+            Domain :=
+                { Stmt0b[i0] : 0 <= i0 <= 126 };
+            Schedule :=
+                { Stmt0b[i0] -> [i0, 1] };
+            ReadAccess :=	[Reduction Type: NONE] [Scalar: 0]
+                { Stmt0b[i0] -> MemRef0[1 + i0] };
+            ReadAccess :=	[Reduction Type: +] [Scalar: 0]
+                { Stmt0b[i0] -> MemRef1[0] };
+            MustWriteAccess :=	[Reduction Type: +] [Scalar: 0]
+                { Stmt0b[i0] -> MemRef1[0] };
+    	Stmt0c
+            Domain :=
+                { Stmt0c[i0] : 0 <= i0 <= 126 };
+            Schedule :=
+                { Stmt0c[i0] -> [i0, 2] };
+            ReadAccess :=	[Reduction Type: NONE] [Scalar: 0]
+                { Stmt0c[i0] -> MemRef1[0] };
+            MustWriteAccess :=	[Reduction Type: NONE] [Scalar: 0]
+                { Stmt0c[i0] -> MemRef2[i0] };
+    }

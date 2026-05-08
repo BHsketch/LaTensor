@@ -3,25 +3,27 @@
 # Setup env
 # # exporting clang path
 export PATH=~/cosmos/life/UIUC/academics/coursework/CS526/latensor/llvm-project/build/bin:$PATH
+LLVM="/home/bhavya/cosmos/life/UIUC/academics/coursework/CS526/latensor/llvm-project/build/bin"
 BENCH=$1
-CLANG="clang++"
+CLANG="${LLVM}/clang++"
+OPT="${LLVM}/opt"
 CORE="/home/bhavya/cosmos/life/UIUC/academics/coursework/CS526/latensor/src/core"
 
 echo "Using clang version: $(${CLANG} --version)"
 
+cd "${BENCH}"
 # Compile kernel with Polly + JScop export — only emits matmul_naive's JScop
-${CLANG} -O1 -mllvm -polly \
-           -mllvm -polly-process-unprofitable \
-           -mllvm -polly-export \
-           -c ${BENCH}/kernel.cpp -o kernel.o
-
-## Compile driver normally — no Polly, no STL-internal SCoP noise
-#${CLANG} -O3 -c ${BENCH}/driver.cpp -o ${BENCH}/driver.o
-
-## Link
-#${CLANG} ${BENCH}/kernel.o ${BENCH}/driver.o -o matmul
+${CLANG} -O0 -Xclang -disable-O0-optnone -ffast-math -S -emit-llvm kernel.cpp -o kernel_raw.ll
 
 # convert to LLVM
-${CLANG} -O3 ${CORE}/jscop2tvm.cpp -o ${BENCH}/jscop2tvm
+# regular
+#${OPT} -load-pass-plugin "${CORE}/build/MyPollyPass.so" -passes="mem2reg,simplifycfg,loop-simplify,loop-rotate,early-cse,indvars,my-polly-scop-pass" -polly-process-unprofitable kernel_raw.ll -disable-output > analysis.out 2>&1 
 
-./${BENCH}/jscop2tvm ${BENCH}/*jscop
+# no early-cse
+${OPT} -load-pass-plugin "${CORE}/build/MyPollyPass.so" -passes="mem2reg,simplifycfg,loop-simplify,loop-rotate,indvars,my-polly-scop-pass" -polly-process-unprofitable kernel_raw.ll -disable-output > analysis.out 2>&1 
+
+# statement granularity bb
+#${OPT} -load-pass-plugin "${CORE}/build/MyPollyPass.so" -passes="mem2reg,simplifycfg,loop-simplify,loop-rotate,indvars,my-polly-scop-pass" -polly-process-unprofitable -polly-stmt-granularity=bb kernel_raw.ll -disable-output > analysis.out 2>&1 
+
+
+cd ..
