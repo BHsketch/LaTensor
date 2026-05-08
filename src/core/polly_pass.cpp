@@ -20,7 +20,6 @@ using namespace llvm;
 
 namespace latensor
 {
-
 	enum IterVarType
 	{
 		spatial,
