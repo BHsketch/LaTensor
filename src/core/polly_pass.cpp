@@ -12,6 +12,7 @@
 #include <isl/ast.h>
 
 #include <utility>
+#include <regex>
 #include "polly/DependenceInfo.h"  // For DependenceInfo, DependenceAnalysis, TYPE_RAW
 #include "polly/CodeGen/IslAst.h"          // For IslAstInfo, IslAstAnalysis
 #include "llvm/Analysis/RegionInfo.h"
@@ -27,19 +28,50 @@ namespace latensor
         scan
     };
 
-    struct Stmt
-    {
-    };
-
     struct TreeNode
     {
+        virtual std::string to_string() = 0;
     };
+
+    std::string indent_lines(const std::string &input)
+    {
+        std::string out;
+        out.reserve(input.size() + 4 * 10);
+
+        out += "    ";
+        for (int i = 0; i < input.length(); i++)
+        {
+            char c = input[i];
+            out += c;
+            if (c == '\n' && i < input.length() - 1)
+            {
+                out += "    ";
+            }
+        }
+        return out;
+    }
 
     struct LoopInfo : TreeNode
     {
+        std::string name;
         long lower_bound;
         long upper_bound;
+        long extent;
+        std::string guard_condition;
+        std::shared_ptr<LoopInfo> parent;
+
         std::vector<std::shared_ptr<TreeNode>> children{};
+
+        std::string to_string()
+        {
+            std::string s = "for " + name + " in T.serial(0, " + std::to_string(upper_bound + 1) + "):\n";
+
+            for (const auto &child: children)
+            {
+                s += indent_lines(child->to_string());
+            }
+            return s;
+        }
     };
 
     // for example, 2i
@@ -55,6 +87,11 @@ namespace latensor
             this->loop_var = std::move(loop_var);
             this->multiplier = mul;
         }
+
+        std::string to_string()
+        {
+            return std::to_string(multiplier) + " * " + loop_var->name;
+        }
     };
 
     // For iter var referencing loops i, j as 2i + 3j + 7 we have:
@@ -66,12 +103,43 @@ namespace latensor
         int added_const;
         IterVarType type;
 
+        long extent;
+        std::string name;
+
         // Default constructor, always sets linear combination to loop_var * 1 + 0
-        IterVarInfo(std::shared_ptr<LoopInfo> loop_var)
+        IterVarInfo(std::shared_ptr<LoopInfo> loop_var, int num)
         {
+            // The spatial axis must be large enough to hold the maximum index
+            this->extent = loop_var->upper_bound + 1;
+            this->name = "vi" + std::to_string(num);
             this->linear_combination.emplace_back(AxisMultiplier(std::move(loop_var), 1));
             this->added_const = 0;
             this->type = spatial;
+        }
+
+        std::string to_string()
+        {
+            std::string t;
+            switch (this->type)
+            {
+                case spatial:
+                    t = "spatial";
+                    break;
+                case reduction:
+                    t = "reduce";
+                    break;
+                case scan:
+                    t = "scan";
+                    break;
+            }
+
+            std::string ac = std::to_string(this->added_const);
+            for (AxisMultiplier &am: linear_combination)
+            {
+                ac += " + " + am.to_string();
+            }
+
+            return name + " = T.axis." + t + "(" + std::to_string(extent) + ", " + ac + ")";
         }
     };
 
@@ -190,10 +258,10 @@ namespace latensor
             for (polly::MemoryAccess *MA: *Stmt)
             {
                 if (MA->getAccessInstruction() == Load)
-                {
                     return buildMathematicalAccess(MA); // Replace with actual index
-                }
             }
+
+            Load->print(errs());
             return "UnknownLoad";
         }
 
@@ -206,10 +274,19 @@ namespace latensor
                 case llvm::Instruction::FAdd:
                     op = " + ";
                     break;
+                case llvm::Instruction::FSub:
+                    op = " - ";
+                    break;
                 case llvm::Instruction::FMul:
                     op = " * ";
                     break;
-                    // add other operations as needed...
+                case llvm::Instruction::FDiv:
+                    op = " / ";
+                    break;
+                default:
+                    throw std::runtime_error("Unsupported binop " + op);
+                    break;
+                    // todo add other operations as needed...
             }
 
             std::string left = buildComputeMath(BinOp->getOperand(0), Stmt);
@@ -223,18 +300,58 @@ namespace latensor
             return std::to_string(ConstFP->getValueAPF().convertToFloat());
         }
 
+        // 4. Is it a Math Intrinsic (like fmaxf)?
+        if (auto *IntrinsicCall = llvm::dyn_cast<llvm::IntrinsicInst>(Val)) {
+            llvm::Intrinsic::ID ID = IntrinsicCall->getIntrinsicID();
+
+            // Check if it's the fmaxf intrinsic (LLVM sometimes uses maxnum or maximum depending on fast-math flags)
+            if (ID == llvm::Intrinsic::maxnum || ID == llvm::Intrinsic::maximum) {
+                // Recursively evaluate the left and right arguments of the max()
+                std::string left = buildComputeMath(IntrinsicCall->getArgOperand(0), Stmt);
+                std::string right = buildComputeMath(IntrinsicCall->getArgOperand(1), Stmt);
+
+                // Format perfectly for TVM!
+                return "T.max(" + left + ", " + right + ")";
+            }
+
+            if (ID == llvm::Intrinsic::minnum || ID == llvm::Intrinsic::minimum) {
+                std::string left = buildComputeMath(IntrinsicCall->getArgOperand(0), Stmt);
+                std::string right = buildComputeMath(IntrinsicCall->getArgOperand(1), Stmt);
+                return "T.min(" + left + ", " + right + ")";
+            }
+
+            if (ID == llvm::Intrinsic::exp) {
+                std::string op = buildComputeMath(IntrinsicCall->getArgOperand(0), Stmt);
+                return "T.exp(" + op + ")";
+            }
+
+            if (ID == llvm::Intrinsic::exp2) {
+                errs() << "exp2\n";
+                std::string op = buildComputeMath(IntrinsicCall->getArgOperand(0), Stmt);
+                return "T.exp2(" + op + ")";
+            }
+
+        }
+
+        Val->print(errs());
+        errs() << "\n";
+
         return "UnsupportedValue";
     }
 
     struct BlockInfo : TreeNode
     {
+        std::string name;
         std::vector<IterVarInfo> iter_vars;
-        std::vector<Stmt> stmts;
-        std::vector<MemoryAccessInfo> mem_accesses;
+        std::vector<MemoryAccessInfo> reads;
+        std::vector<MemoryAccessInfo> writes;
         std::vector<TVMComputeStmt> compute_stmts;
+
+        std::shared_ptr<LoopInfo> parent_loop;
 
         explicit BlockInfo(polly::ScopStmt *Stmt)
         {
+            this->name = Stmt->getBaseName();
             for (polly::MemoryAccess *MA: *Stmt)
             {
                 // Skip scalar/register dependencies for TVM buffer mappings
@@ -248,15 +365,13 @@ namespace latensor
                 // Get the mathematical index mapping (e.g., { Stmt[i,j] -> MemRef_A[128i + j] })
                 isl::map access_map = MA->getAccessRelation();
 
-                // To cleanly translate this to TVM, you extract the output dimension math.
-                // A quick hack for prototyping is converting it to a C string:
-                // In production, you'd use isl_pw_multi_aff to map this directly to TVM TIR nodes.
                 isl::pw_multi_aff pma = isl::pw_multi_aff::from_map(access_map);
                 mem_info.access_str = buildMathematicalAccess(MA);
-                errs() << "aaaaaaaaaa " << mem_info.array_name << " " << mem_info.is_read << " "
-                       << mem_info.is_write << " " << mem_info.access_str << "\n";
 
-                this->mem_accesses.push_back(mem_info);
+                if (mem_info.is_read)
+                    this->reads.push_back(mem_info);
+                if (mem_info.is_write)
+                    this->writes.push_back(mem_info);
             }
 
             for (polly::MemoryAccess *MA: *Stmt)
@@ -277,10 +392,74 @@ namespace latensor
 
                         this->compute_stmts.push_back(compute);
 
-                        llvm::errs() << "Extracted Compute: " << compute.lhs << " = " << compute.rhs << "\n";
+//                        llvm::errs() << "Extracted Compute: " << compute.lhs << " = " << compute.rhs << "\n";
                     }
                 }
             }
+        }
+
+        std::string to_string()
+        {
+            std::string s = "with T.block(\"" + this->name + "\"):\n";
+            // Combine all loop guards into one T.where!
+            std::shared_ptr<latensor::LoopInfo> loop = this->parent_loop;
+            std::string combined_guard = "";
+
+            for (auto iv: iter_vars)
+            {
+                s += "    " + iv.to_string() + "\n";
+            }
+
+            while (loop)
+            {
+                if (!loop->guard_condition.empty())
+                {
+                    if (combined_guard.empty())
+                        combined_guard += "T.where(";
+                    else
+                        combined_guard += " and ";
+
+                    std::string g = loop->guard_condition;
+
+                    for (const auto& iv: iter_vars)
+                    {
+                        for (const AxisMultiplier& am: iv.linear_combination)
+                        {
+                            std::regex word_regex("\\b" + am.loop_var->name + "\\b");
+                            g = std::regex_replace(g, word_regex, iv.name);
+                        }
+                    }
+
+                    combined_guard += g;
+                }
+
+                loop = loop->parent;
+            }
+
+
+            if (!combined_guard.empty())
+                s += "    " + combined_guard + ")\n";
+
+            s += "    T.reads(";
+            for (int i = 0; i < this->reads.size(); i++)
+            {
+                if (i > 0)
+                    s += ", ";
+                s += this->reads[i].access_str;
+            }
+            s += ")\n    T.writes(";
+            for (int i = 0; i < this->writes.size(); i++)
+            {
+                if (i > 0)
+                    s += ", ";
+                s += this->writes[i].access_str;
+            }
+            s += ")\n";
+            for (const auto &st: this->compute_stmts)
+            {
+                s += "    " + st.lhs + " = " + st.rhs + "\n";
+            }
+            return s;
         }
     };
 
@@ -585,8 +764,7 @@ namespace latensor
         return true;
     }
 
-    static std::vector<ClassifyResult>
-    classifyStmt(polly::ScopStmt &Stmt, const polly::Dependences &Deps)
+    static std::vector<ClassifyResult> classifyStmt(polly::ScopStmt &Stmt, const polly::Dependences &Deps)
     {
         std::vector<ClassifyResult> results;
 
@@ -658,15 +836,15 @@ namespace latensor
             bool prop1 = hasRED || (hasRAW && hasWAR && hasWAW);
 
             // Cross-check Polly only for array-kind writes; scalar MKs make this noisy.
-            if (WriteMA->isArrayKind() && pollyReductionLike != prop1)
-            {
-                errs() << "      [classifyStmt] " << name
-                       << " (write @ " << WriteMA << "): Polly reductionLike="
-                       << pollyReductionLike << " disagrees with prop1=" << prop1
-                       << " (using our analysis)\n"
-                       << "        RAW=" << hasRAW << " WAR=" << hasWAR
-                       << " WAW=" << hasWAW << " RED=" << hasRED << "\n";
-            }
+//            if (WriteMA->isArrayKind() && pollyReductionLike != prop1)
+//            {
+//                errs() << "      [classifyStmt] " << name
+//                       << " (write @ " << WriteMA << "): Polly reductionLike="
+//                       << pollyReductionLike << " disagrees with prop1=" << prop1
+//                       << " (using our analysis)\n"
+//                       << "        RAW=" << hasRAW << " WAR=" << hasWAR
+//                       << " WAW=" << hasWAW << " RED=" << hasRED << "\n";
+//            }
 
             if (!prop1)
             {
@@ -688,9 +866,9 @@ namespace latensor
                     accumLoads += countAccumLoads(I, &Stmt, WriteMA);
                 if (accumLoads != 1)
                 {
-                    errs() << "      [classifyStmt] " << name
-                           << " (write @ " << WriteMA << "): scalar/synthetic write with "
-                           << accumLoads << " accumulator reads -- skipping (spatial)\n";
+//                    errs() << "      [classifyStmt] " << name
+//                           << " (write @ " << WriteMA << "): scalar/synthetic write with "
+//                           << accumLoads << " accumulator reads -- skipping (spatial)\n";
                     results.push_back(R);
                     continue;
                 }
@@ -707,10 +885,10 @@ namespace latensor
                 int accumLoads = countAccumLoads(RHS, &Stmt, WriteMA);
                 if (accumLoads != 1)
                 {
-                    errs() << "      [classifyStmt] " << name
-                           << " (write @ " << WriteMA << "): complicated reduction "
-                           << "(accumulator read " << accumLoads
-                           << " times in RHS, expected 1) -- skipping (spatial)\n";
+//                    errs() << "      [classifyStmt] " << name
+//                           << " (write @ " << WriteMA << "): complicated reduction "
+//                           << "(accumulator read " << accumLoads
+//                           << " times in RHS, expected 1) -- skipping (spatial)\n";
                     results.push_back(R);
                     continue;
                 }
@@ -781,13 +959,13 @@ namespace latensor
 
             if (prop2_scan)
             {
-                if (R.red_axes.size() != 1)
-                {
-                    errs() << "      [classifyStmt] " << name
-                           << " (write @ " << WriteMA << "): scan with "
-                           << R.red_axes.size()
-                           << " carrying axes -- outside scalar-accumulator assumption\n";
-                }
+//                if (R.red_axes.size() != 1)
+//                {
+//                    errs() << "      [classifyStmt] " << name
+//                           << " (write @ " << WriteMA << "): scan with "
+//                           << R.red_axes.size()
+//                           << " carrying axes -- outside scalar-accumulator assumption\n";
+//                }
                 R.stmt_type = scan;
             }
             else
@@ -819,7 +997,7 @@ namespace latensor
                 return PreservedAnalyses::all();
             }
 
-            errs() << "Function: " << F.getName() << "\n";
+//            errs() << "Function: " << F.getName() << "\n";
 
             polly::ScopStandardAnalysisResults AR = {
                     FAM.getResult<llvm::DominatorTreeAnalysis>(F),
@@ -842,6 +1020,11 @@ namespace latensor
 
                 // 2. Build the entire tree of LoopInfos and BlockInfos!
                 std::vector<std::shared_ptr<TreeNode>> LoopTree = walkAST(RootNode, {});
+                errs() << "TVM CODE IS:\n";
+                for (auto lt: LoopTree)
+                {
+                    errs() << lt->to_string();
+                }
 
                 // Now LoopTree contains your fully structured, nested hierarchy.
 
@@ -862,22 +1045,21 @@ namespace latensor
 
                 for (polly::ScopStmt &Stmt: *S)
                 {
-                    errs() << "    Stmt: " << Stmt.getBaseName() << "\n";
-
-                    isl::set Domain = Stmt.getDomain();
-                    char *DomainStr = isl_set_to_str(Domain.get());
-                    errs() << "      Loop Bounds (Domain): " << DomainStr << "\n";
-                    free(DomainStr);
-
-                    for (Instruction *I: Stmt.getInstructions())
-                        errs() << "      Inst: " << *I << "\n";
-
-                    for (polly::MemoryAccess *MA: Stmt)
-                    {
-                        errs() << "      MemAccess: ";
-                        MA->print(errs());
-                        errs() << "\n";
-                    }
+//
+//                    isl::set Domain = Stmt.getDomain();
+//                    char *DomainStr = isl_set_to_str(Domain.get());
+//                    errs() << "      Loop Bounds (Domain): " << DomainStr << "\n";
+//                    free(DomainStr);
+//
+//                    for (Instruction *I: Stmt.getInstructions())
+//                        errs() << "      Inst: " << *I << "\n";
+//
+//                    for (polly::MemoryAccess *MA: Stmt)
+//                    {
+//                        errs() << "      MemAccess: ";
+//                        MA->print(errs());
+//                        errs() << "\n";
+//                    }
 
                     try
                     {
@@ -887,15 +1069,15 @@ namespace latensor
                             const char *kind = (r.stmt_type == scan) ? "scan"
                                                                      : (r.stmt_type == reduction) ? "reduction"
                                                                                                   : "spatial";
-                            errs() << "      => write @ " << r.write << ": " << kind;
+//                            errs() << "      => write @ " << r.write << ": " << kind;
                             if (!r.red_axes.empty())
                             {
-                                errs() << ", carrying dims [";
-                                for (size_t i = 0; i < r.red_axes.size(); ++i)
-                                    errs() << (i ? ", " : "") << r.red_axes[i];
-                                errs() << "]";
+//                                errs() << ", carrying dims [";
+//                                for (size_t i = 0; i < r.red_axes.size(); ++i)
+//                                    errs() << (i ? ", " : "") << r.red_axes[i];
+//                                errs() << "]";
                             }
-                            errs() << "\n";
+//                            errs() << "\n";
                         }
                         if (!cr.empty())
                             stmt_classification[&Stmt] = std::move(cr);
@@ -906,7 +1088,7 @@ namespace latensor
                     }
                 }
 
-                S->print(llvm::errs(), false);
+//                S->print(llvm::errs(), false);
             }
 
             // 4. Return the analyses preserved (all of them, since we only read)
@@ -926,44 +1108,50 @@ namespace latensor
             if (isl_ast_node_get_type(Node.get()) == isl_ast_node_for)
             {
                 auto current_loop = std::make_shared<LoopInfo>();
-                bool found = get_loop_bound(Node, current_loop);
+                bool found = get_loop_bound(Node, current_loop, loop_backtrace);
                 if (!found)
                     throw std::runtime_error("LaTensor: Failed to convert -- loop bounds are not simple");
 
-                errs() << "loop begin\n";
+//                errs() << "loop begin\n";
                 // Recurse into the body of the loop
 
-                errs() << isl_ast_node_to_str(Node.get()) << "\n";
+//                errs() << isl_ast_node_to_str(Node.get()) << "\n";
                 isl::ast_node Body = isl::manage(isl_ast_node_for_get_body(Node.get()));
+
+                if (!loop_backtrace.empty())
+                    current_loop->parent = loop_backtrace[loop_backtrace.size() - 1];
+
                 loop_backtrace.emplace_back(current_loop);
                 current_loop->children = walkAST(Body, loop_backtrace);
 
-                errs() << "loop end\n";
+//                errs() << "loop end " << current_loop->name << ": " << current_loop->children.size() << "\n";
+
+//                errs() << "loop str: " << current_loop->to_string();
 
                 result.push_back(current_loop);
             }
 
-                // 2. IS THIS A BLOCK (SIDE-BY-SIDE SIBLINGS)?
+            // 2. IS THIS A BLOCK (SIDE-BY-SIDE SIBLINGS)?
             else if (isl_ast_node_get_type(Node.get()) == isl_ast_node_block)
             {
                 isl::ast_node_list List = isl::manage(isl_ast_node_block_get_children(Node.get()));
                 int num_children = isl_ast_node_list_n_ast_node(List.get());
 
                 // Iterate through all siblings in this block
+//                errs() << "siblings begin\n";
                 for (int i = 0; i < num_children; i++)
                 {
                     isl::ast_node ChildNode = isl::manage(isl_ast_node_list_get_ast_node(List.get(), i));
 
-                    errs() << "siblings begin\n";
                     // Recurse and append all resulting loops to our current level
                     auto siblings = walkAST(ChildNode, loop_backtrace);
                     result.insert(result.end(), siblings.begin(), siblings.end());
-                    errs() << "siblings end\n";
-
+//                    errs() << "siblings "<< siblings.size() << " children " << num_children << " result " << result.size() << "\n";
                 }
+//                errs() << "siblings end\n";
             }
 
-                // 3. IS THIS A COMPUTATION NODE (SCOPSTMT)?
+            // 3. IS THIS A COMPUTATION NODE (SCOPSTMT)?
             else if (isl_ast_node_get_type(Node.get()) == isl_ast_node_user)
             {
                 // --- THE POLLY MAGIC TRICK ---
@@ -979,13 +1167,19 @@ namespace latensor
 
                 // Create a leaf node in your tree to hold this Block
                 auto leaf = std::make_shared<BlockInfo>(Stmt);
-                errs() << "a block!\n";
-                errs() << *Stmt << "\n";
+//                errs() << "a block!\n";
+//                errs() << *Stmt->printInstructions() << "\n";
+                Stmt->printInstructions(errs());
 
+                if (!loop_backtrace.empty())
+                    leaf->parent_loop = loop_backtrace[loop_backtrace.size() - 1];
+
+                int i = 0;
                 for (const std::shared_ptr<LoopInfo> &li: loop_backtrace)
                 {
-                    IterVarInfo thing = IterVarInfo(li);
+                    IterVarInfo thing = IterVarInfo(li, i);
                     leaf->iter_vars.emplace_back(thing);
+                    i++;
                 }
 
                 result.push_back(leaf);
@@ -1010,56 +1204,173 @@ namespace latensor
             return result;
         }
 
-        // Returns true if ast node has nice lower/upper bounds, and populates the treeNode values.
-        static bool get_loop_bound(isl::ast_node &Node, const std::shared_ptr<LoopInfo> &tree_node)
+        struct Interval
         {
-            long lower = 0;
-            long upper = 0;
+            long min;
+            long max;
+        };
 
-            // 1. EXTRACT THE LOWER BOUND (Init)
+        // Evaluates the min and max possible values of an ISL AST Math Expression
+        Interval evaluate_bound(isl_ast_expr *expr, const std::vector<std::shared_ptr<LoopInfo>> &backtrace)
+        {
+            auto type = isl_ast_expr_get_type(expr);
+
+            // Base Case 1: Pure integer (e.g., 10)
+            if (type == isl_ast_expr_int)
+            {
+                isl_val *v = isl_ast_expr_get_val(expr);
+                long val = isl_val_get_num_si(v);
+                isl_val_free(v);
+                return {val, val};
+            }
+                // Base Case 2: Variable (e.g., c0)
+            else if (type == isl_ast_expr_id)
+            {
+                isl_id *id = isl_ast_expr_get_id(expr);
+                std::string name = isl_id_get_name(id);
+                isl_id_free(id);
+
+                // Find this outer loop in our backtrace to get its bounds
+                for (const auto &li: backtrace)
+                {
+                    if (li->name == name) return {li->lower_bound, li->upper_bound};
+                }
+                return {0, 0}; // Fallback if not found
+            }
+                // Recursive Case: Math Operation
+            else if (type == isl_ast_expr_op)
+            {
+                auto op_type = isl_ast_expr_get_op_type(expr);
+
+                // Extract arguments
+                isl_ast_expr *arg0 = isl_ast_expr_get_op_arg(expr, 0);
+                isl_ast_expr *arg1 = isl_ast_expr_get_op_arg(expr, 1);
+
+                Interval i0 = evaluate_bound(arg0, backtrace);
+                Interval i1 = evaluate_bound(arg1, backtrace);
+
+                isl_ast_expr_free(arg0);
+                isl_ast_expr_free(arg1);
+
+                if (op_type == isl_ast_op_add)
+                {
+                    return {i0.min + i1.min, i0.max + i1.max};
+                }
+                else if (op_type == isl_ast_op_sub)
+                {
+                    return {i0.min - i1.max, i0.max - i1.min};
+                }
+                else if (op_type == isl_ast_op_mul)
+                {
+                    // Find absolute extremes of multiplication
+                    long vals[4] = {i0.min * i1.min, i0.min * i1.max, i0.max * i1.min, i0.max * i1.max};
+                    long cmin = vals[0], cmax = vals[0];
+                    for (int i = 1; i < 4; ++i)
+                    {
+                        if (vals[i] < cmin) cmin = vals[i];
+                        if (vals[i] > cmax) cmax = vals[i];
+                    }
+                    return {cmin, cmax};
+                }
+                else if (op_type == isl_ast_op_min)
+                {
+                    return {std::min(i0.min, i1.min), std::min(i0.max, i1.max)};
+                }
+                else if (op_type == isl_ast_op_max)
+                {
+                    return {std::max(i0.min, i1.min), std::max(i0.max, i1.max)};
+                }
+            }
+
+            return {0, 0};
+        }
+
+        std::string get_ast_expr_str(isl_ast_expr *expr)
+        {
+            isl_printer *p = isl_printer_to_str(isl_ast_expr_get_ctx(expr));
+            p = isl_printer_set_output_format(p, ISL_FORMAT_C);
+            p = isl_printer_print_ast_expr(p, expr);
+            char *s = isl_printer_get_str(p);
+            std::string res(s);
+            free(s);
+            isl_printer_free(p);
+            return res;
+        }
+
+        // Update definition to pass loop_backtrace
+        bool get_loop_bound(isl::ast_node &Node, const std::shared_ptr<LoopInfo> &tree_node,
+                            const std::vector<std::shared_ptr<LoopInfo>> &backtrace)
+        {
+            // 1. EXTRACT THE LOOP VARIABLE NAME (Do this first!)
+            isl::ast_expr iter_expr = isl::manage(isl_ast_node_for_get_iterator(Node.get()));
+            isl::id iter_id = isl::manage(isl_ast_expr_get_id(iter_expr.get()));
+            std::string iter_name = isl_id_get_name(iter_id.get());
+            tree_node->name = iter_name;
+
+            // Variables for the guard condition strings
+            std::string lb_str = "";
+            std::string ub_str = "";
+            std::string op_str = "";
+
+            // 2. EXTRACT LOWER BOUND
             isl::ast_expr init_expr = isl::manage(isl_ast_node_for_get_init(Node.get()));
 
-            if (isl_ast_expr_get_type(init_expr.get()) == isl_ast_expr_int)
-            {
-                // It's a pure integer! Extract it.
-                isl::val init_val = isl::manage(isl_ast_expr_get_val(init_expr.get()));
-                lower = isl_val_get_num_si(init_val.get());
-            }
-            else
-            {
-                // It might be a variable or math expression (e.g., 'N' or 'N + 1')
-                return false;
-            }
+            // Evaluate the absolute min using Interval arithmetic
+            Interval init_interval = evaluate_bound(init_expr.get(), backtrace);
+            tree_node->lower_bound = init_interval.min;
 
-            // 2. EXTRACT THE UPPER BOUND (Cond)
-            // The condition is usually a binary operation like (c0 <= 127)
+            // Save the expression string (e.g., "c0" or "0")
+            lb_str = get_ast_expr_str(init_expr.get());
+            errs() << "lower: " << lb_str << "\n";
+
+            // 3. EXTRACT UPPER BOUND
             isl::ast_expr cond_expr = isl::manage(isl_ast_node_for_get_cond(Node.get()));
 
             if (isl_ast_expr_get_type(cond_expr.get()) == isl_ast_expr_op)
             {
-                // We expect an operator like '<' or '<='.
-                // Argument 0 is the iterator (c0). Argument 1 is the limit (127).
                 isl::ast_expr ub_expr = isl::manage(isl_ast_expr_get_op_arg(cond_expr.get(), 1));
 
-                if (isl_ast_expr_get_type(ub_expr.get()) == isl_ast_expr_int)
-                {
-                    // The right hand side of the condition is a pure integer!
-                    isl::val ub_val = isl::manage(isl_ast_expr_get_val(ub_expr.get()));
-                    upper = isl_val_get_num_si(ub_val.get());
+                // Evaluate the absolute max using Interval arithmetic
+                Interval ub_interval = evaluate_bound(ub_expr.get(), backtrace);
 
-                    // Check if the operator was '<' or '<=' to know the exact range
-                    enum isl_ast_op_type op_type = isl_ast_expr_get_op_type(cond_expr.get());
-                    if (op_type == isl_ast_op_le)
-                        upper++;
-                    else if (op_type != isl_ast_op_lt)
-                        return false;
+                enum isl_ast_op_type op_type = isl_ast_expr_get_op_type(cond_expr.get());
+                if (op_type == isl_ast_op_le)
+                {
+                    tree_node->upper_bound = ub_interval.max;
+                    op_str = "<=";
+                }
+                else if (op_type == isl_ast_op_lt)
+                {
+                    tree_node->upper_bound = ub_interval.max - 1;
+                    op_str = "<";
                 }
                 else
+                {
                     return false;
+                }
+
+                // Save the expression string (e.g., "2 * c0" or "10")
+                ub_str = get_ast_expr_str(ub_expr.get());
+                errs() << "upper: " << ub_str << "\n";
+            }
+            else
+            {
+                return false;
             }
 
-            tree_node->lower_bound = lower;
-            tree_node->upper_bound = upper;
+            // 4. GENERATE THE GUARD CONDITION
+            // Force the guard if the math doesn't start at 0, or doesn't end at the absolute maximum
+            if (lb_str != "0" || ub_str != std::to_string(tree_node->upper_bound))
+            {
+                // Use Python 'and' for TVMScript
+                tree_node->guard_condition =
+                        iter_name + " >= " + lb_str + " and " + iter_name + " " + op_str + " " + ub_str;
+
+//                llvm::errs() << "Created dynamic guard: " << tree_node->guard_condition << "\n";
+            }
+
+            tree_node->extent = tree_node->upper_bound - tree_node->lower_bound + 1;
+
             return true;
         }
     };
