@@ -791,24 +791,17 @@ namespace latensor
 				auto &ASTInfo = SAM.getResult<polly::IslAstAnalysis>(*S, AR);
 				isl::ast_node RootNode = ASTInfo.getAst();
 
-				// 2. Build the entire tree of LoopInfos and BlockInfos!
-				std::vector<std::shared_ptr<TreeNode>> LoopTree = walkAST(RootNode, {});
-
-				// Now LoopTree contains your fully structured, nested hierarchy.
-
-				// 1. Let auto resolve the exact wrapper type returned by the Pass Manager
-				auto &DI = SAM.getResult<polly::DependenceAnalysis>(*S, AR);
-
-				// 2. Get the Dependences analysis object at the per-access level.
+				// 2. Get the Dependences analysis at per-access granularity.
 				// AL_Access is required so we can disambiguate which write within
 				// a multi-write ScopStmt produced each dependence -- crucial for
 				// detecting scans where Polly merged producer and consumer into
 				// a single ScopStmt.
+				auto &DI = SAM.getResult<polly::DependenceAnalysis>(*S, AR);
 				const polly::Dependences &Deps = DI.getDependences(polly::Dependences::AL_Access);
-
-				// 3. Extract the actual ISL union_map for the True (RAW) dependencies
 				isl::union_map TrueDeps = Deps.getDependences(polly::Dependences::TYPE_RAW);
 
+				// 3. Classify every Stmt up front so walkAST can stamp each
+				// surrounding loop's IterVarType when it reaches a user node.
 				std::map<polly::ScopStmt *, std::vector<ClassifyResult>> stmt_classification{};
 
 				for (polly::ScopStmt &Stmt: *S)
@@ -851,6 +844,11 @@ namespace latensor
 					}
 				}
 
+				// 4. Build the LoopInfo/BlockInfo tree, consulting
+				// stmt_classification at each user node.
+				std::vector<std::shared_ptr<TreeNode>> LoopTree =
+					walkAST(RootNode, {}, stmt_classification);
+
 				S->print(llvm::errs(), false);
 			}
 
@@ -860,7 +858,10 @@ namespace latensor
 
 		// The main recursive walker
 		std::vector<std::shared_ptr<TreeNode>>
-			walkAST(isl::ast_node Node, std::vector<std::shared_ptr<LoopInfo>> loop_backtrace)
+			walkAST(isl::ast_node Node,
+					std::vector<std::shared_ptr<LoopInfo>> loop_backtrace,
+					const std::map<polly::ScopStmt *, std::vector<ClassifyResult>>
+						&stmt_classification)
 			{
 				std::vector<std::shared_ptr<TreeNode>> result;
 
@@ -881,7 +882,7 @@ namespace latensor
 					errs() << isl_ast_node_to_str(Node.get()) << "\n";
 					isl::ast_node Body = isl::manage(isl_ast_node_for_get_body(Node.get()));
 					loop_backtrace.emplace_back(current_loop);
-					current_loop->children = walkAST(Body, loop_backtrace);
+					current_loop->children = walkAST(Body, loop_backtrace, stmt_classification);
 
 					errs() << "loop end\n";
 
@@ -901,7 +902,7 @@ namespace latensor
 
 						errs() << "siblings begin\n";
 						// Recurse and append all resulting loops to our current level
-						auto siblings = walkAST(ChildNode, loop_backtrace);
+						auto siblings = walkAST(ChildNode, loop_backtrace, stmt_classification);
 						result.insert(result.end(), siblings.begin(), siblings.end());
 						errs() << "siblings end\n";
 
@@ -927,10 +928,40 @@ namespace latensor
 					errs() << "a block!\n";
 					errs() << *Stmt << "\n";
 
+					// One IterVarInfo per surrounding loop, defaulting to spatial.
 					for (const std::shared_ptr<LoopInfo> &li: loop_backtrace)
+						leaf->iter_vars.emplace_back(IterVarInfo(li));
+
+					// Stamp reduction/scan axes from classifyStmt onto the
+					// matching loops. Stmts with no entry stay all-spatial.
+					auto it = stmt_classification.find(Stmt);
+					if (it != stmt_classification.end())
 					{
-						IterVarInfo thing = IterVarInfo(li);
-						leaf->iter_vars.emplace_back(thing);
+						// AST loop nesting depth must match the Stmt's domain
+						// dim count for the 1:1 red_axes -> loop_backtrace
+						// indexing to be valid. Non-identity Polly schedules
+						// (tiling, fusion) would break this.
+						if (loop_backtrace.size() != Stmt->getNumIterators())
+							throw std::runtime_error(
+								"LaTensor: AST loop depth does not match Stmt "
+								"iteration domain dim count -- non-identity "
+								"Polly schedule is not supported");
+
+						for (const ClassifyResult &cr: it->second)
+						{
+							if (cr.stmt_type == spatial) continue;
+							for (unsigned d: cr.red_axes)
+							{
+								IterVarType &slot = leaf->iter_vars[d].type;
+								if (slot == spatial)
+									slot = cr.stmt_type;
+								else if (slot != cr.stmt_type)
+									throw std::runtime_error(
+										"LaTensor: axis classified as both "
+										"reduction and scan by different writes "
+										"in the same Stmt -- unsupported");
+							}
+						}
 					}
 
 					result.push_back(leaf);
@@ -949,7 +980,7 @@ namespace latensor
 					isl::ast_node InnerNode = isl::manage(isl_ast_node_mark_get_node(Node.get()));
 
 					// Recurse directly into the inner node and return its result!
-					return walkAST(InnerNode, loop_backtrace);
+					return walkAST(InnerNode, loop_backtrace, stmt_classification);
 				}
 
 				return result;
