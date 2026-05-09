@@ -1,8 +1,0 @@
-/home/bhavya/cosmos/life/UIUC/academics/coursework/CS526/latensor/src/core/build/CMakeFiles/intrinsics_gen.dir
-/home/bhavya/cosmos/life/UIUC/academics/coursework/CS526/latensor/src/core/build/CMakeFiles/vt_gen.dir
-/home/bhavya/cosmos/life/UIUC/academics/coursework/CS526/latensor/src/core/build/CMakeFiles/omp_gen.dir
-/home/bhavya/cosmos/life/UIUC/academics/coursework/CS526/latensor/src/core/build/CMakeFiles/acc_gen.dir
-/home/bhavya/cosmos/life/UIUC/academics/coursework/CS526/latensor/src/core/build/CMakeFiles/target_parser_gen.dir
-/home/bhavya/cosmos/life/UIUC/academics/coursework/CS526/latensor/src/core/build/CMakeFiles/MyPollyPass.dir
-/home/bhavya/cosmos/life/UIUC/academics/coursework/CS526/latensor/src/core/build/CMakeFiles/edit_cache.dir
-/home/bhavya/cosmos/life/UIUC/academics/coursework/CS526/latensor/src/core/build/CMakeFiles/rebuild_cache.dir
