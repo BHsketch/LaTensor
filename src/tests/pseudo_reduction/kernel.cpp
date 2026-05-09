@@ -4,8 +4,9 @@ extern "C" void pseudo_reduction(const float* __restrict A, float* __restrict T,
   for (int i = 0; i < N-1; i++) {
 	  S[0] = A[i];      
 	  S[0] += A[i+1];
-	  T[i] = S[0];
+	  //T[i] = S[0];
   }
+  T[0] = S[0];
 }
 //__attribute__((noinline)) extern "C" void escape(double *p) { (void)p; }                                                                                                                  
 //__attribute__((noinline)) extern "C" void barrier(void) {}                                                                                                                                

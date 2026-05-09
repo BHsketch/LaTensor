@@ -20,10 +20,10 @@ ${CLANG} -O0 -Xclang -disable-O0-optnone -ffast-math -S -emit-llvm kernel.cpp -o
 #${OPT} -load-pass-plugin "${CORE}/build/MyPollyPass.so" -passes="mem2reg,simplifycfg,loop-simplify,loop-rotate,early-cse,indvars,my-polly-scop-pass" -polly-process-unprofitable kernel_raw.ll -disable-output > analysis.out 2>&1 
 
 # no early-cse
-${OPT} -load-pass-plugin "${CORE}/build/MyPollyPass.so" -passes="mem2reg,simplifycfg,loop-simplify,loop-rotate,indvars,my-polly-scop-pass" -polly-process-unprofitable kernel_raw.ll -disable-output > analysis.out 2>&1 
+#${OPT} -load-pass-plugin "${CORE}/build/MyPollyPass.so" -passes="mem2reg,simplifycfg,loop-simplify,loop-rotate,indvars,my-polly-scop-pass" -polly-process-unprofitable kernel_raw.ll -disable-output > analysis.out 2>&1 
 
-# statement granularity bb
-#${OPT} -load-pass-plugin "${CORE}/build/MyPollyPass.so" -passes="mem2reg,simplifycfg,loop-simplify,loop-rotate,indvars,my-polly-scop-pass" -polly-process-unprofitable -polly-stmt-granularity=bb kernel_raw.ll -disable-output > analysis.out 2>&1 
+# no early-cse, statement granularity bb
+${OPT} -load-pass-plugin "${CORE}/build/MyPollyPass.so" -passes="mem2reg,simplifycfg,loop-simplify,loop-rotate,early-cse,indvars,my-polly-scop-pass" -polly-process-unprofitable -polly-stmt-granularity=bb kernel_raw.ll -disable-output > analysis.out 2>&1 
 
 
 cd ..

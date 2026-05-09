@@ -7,7 +7,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-SIZES="${@:-128 256 512 1024 2048}"
+SIZES="${@:-128 256 512 1024}"
 
 # Activate venv if it exists
 VENV_DIR="$HOME/tvm-venv"

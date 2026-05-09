@@ -596,6 +596,16 @@ namespace latensor
 				isl::union_map redSinkW = filterAccessDeps(red, name, "",   accW, "", true, /*acceptPlain=*/true);
 
 				isl::map selfRAW    = extractSelfMap(rawW,     name);
+				// Drop zero-distance entries (source iter == sink iter). A real
+				// accumulator read must be fed by a write in a PREVIOUS
+				// iteration; same-iteration self-RAW would arise only in
+				// degenerate cases and is not evidence of a reduction.
+				if (!selfRAW.is_null()) {
+					isl_map *raw_c = isl_map_copy(selfRAW.get());
+					isl_set *dom_c = isl_map_domain(isl_map_copy(raw_c));
+					isl_map *id_c  = isl_set_identity(dom_c);
+					selfRAW = isl::manage(isl_map_subtract(raw_c, id_c));
+				}
 				isl::map selfWAR    = extractSelfMap(warW,     name);
 				isl::map selfWAW    = extractSelfMap(wawW,     name);
 				isl::map selfREDsrc = extractSelfMap(redSrcW,  name);
@@ -629,7 +639,11 @@ namespace latensor
 
 				// --- Property 3: exactly one read of THIS accumulator location
 				// in the RHS. Also remember the accumulator-read MA so prop2
-				// can exclude it. ---
+				// can exclude it. 
+				// This catches cases where there exists a loop-independent WAR
+				// dependency for the access we're focusing on, but the actual 
+				// write computation doesn't use the read value (i.e. the read
+				// happened for an unrelated reason) ---
 				polly::MemoryAccess *accumReadMA = nullptr;
 				auto *StoreI = llvm::dyn_cast<llvm::StoreInst>(WriteMA->getAccessInstruction());
 				if (!StoreI) {
@@ -1025,6 +1039,10 @@ llvmGetPassPluginInfo()
 }
 
 /*
+possible improvements:
+- make sure the RAW dependencies detected have a positive distance
+- should we fallback to polly for reduction detection?
+
 Algorithm:
 root = build_isl_ast()
 process_ast_node(root)

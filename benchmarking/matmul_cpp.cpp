@@ -38,7 +38,7 @@ static void fill_random(float* m, int N, std::mt19937& rng) {
 }
 
 // ---------- Variant 1: Naive ijk loop order ----------
-static void matmul_naive(const float* A, const float* B, float* C, int N) {
+static void matmul_naive(const float* __restrict A, const float* __restrict B, float* __restrict C, int N) {
     for (int i = 0; i < N; i++) {
         for (int j = 0; j < N; j++) {
             float sum = 0.0f;
@@ -51,7 +51,7 @@ static void matmul_naive(const float* A, const float* B, float* C, int N) {
 }
 
 // ---------- Variant 2: Reordered ikj (better cache access for B) ----------
-static void matmul_reordered(const float* A, const float* B, float* C, int N) {
+static void matmul_reordered(const float* __restrict A, const float* __restrict B, float* __restrict C, int N) {
     std::memset(C, 0, N * N * sizeof(float));
     for (int i = 0; i < N; i++) {
         for (int k = 0; k < N; k++) {
