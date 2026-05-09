@@ -31,13 +31,15 @@ namespace latensor
     {
     };
 
-    struct TreeNode { };
+    struct TreeNode
+    {
+    };
 
     struct LoopInfo : TreeNode
     {
         long lower_bound;
         long upper_bound;
-        std::vector<std::shared_ptr<TreeNode>> children {};
+        std::vector<std::shared_ptr<TreeNode>> children{};
     };
 
     // for example, 2i
@@ -59,7 +61,7 @@ namespace latensor
     struct IterVarInfo
     {
         // 2i, (+) 3j
-        std::vector<AxisMultiplier> linear_combination {};
+        std::vector<AxisMultiplier> linear_combination{};
         // ... + 7
         int added_const;
         IterVarType type;
@@ -87,7 +89,8 @@ namespace latensor
         std::string rhs; // e.g., "A[vi, vk] * B[vk, vj]"
     };
 
-    std::string buildMathematicalAccess(polly::MemoryAccess *MA) {
+    std::string buildMathematicalAccess(polly::MemoryAccess *MA)
+    {
         // 1. Get the Array Name (e.g., "MemRef1")
         std::string array_name = MA->getScopArrayInfo()->getName();
 
@@ -102,17 +105,20 @@ namespace latensor
         // An access might theoretically have multiple piecewise conditions (e.g., if/else inside loop)
         // For standard loops, there is only one piece. We extract it using a callback:
         isl_multi_aff *ma = nullptr;
-        isl_pw_multi_aff_foreach_piece(pma_c, [](isl_set *set, isl_multi_aff *m_aff, void *user) -> isl_stat {
-                isl_multi_aff **ma_ptr = static_cast<isl_multi_aff **>(user);
-                if (!*ma_ptr) {
+        isl_pw_multi_aff_foreach_piece(pma_c, [](isl_set *set, isl_multi_aff *m_aff, void *user) -> isl_stat
+        {
+            isl_multi_aff **ma_ptr = static_cast<isl_multi_aff **>(user);
+            if (!*ma_ptr)
+            {
                 *ma_ptr = isl_multi_aff_copy(m_aff); // Copy the first math piece we find
-                }
-                isl_set_free(set);
-                isl_multi_aff_free(m_aff);
-                return isl_stat_ok;
-                }, &ma);
+            }
+            isl_set_free(set);
+            isl_multi_aff_free(m_aff);
+            return isl_stat_ok;
+        }, &ma);
 
-        if (ma) {
+        if (ma)
+        {
             // We want the math for the 1st dimension of the array access (Index 0)
             // E.g., for MemRef1[128 * i0 + i1], this gets the (128 * i0 + i1) expression
             isl_aff *aff = isl_multi_aff_get_aff(ma, 0);
@@ -123,18 +129,23 @@ namespace latensor
             bool is_first = true;
 
             // 3. EXTRACT THE COEFFICIENTS (e.g., the '128' in 128*vi0)
-            for (int i = 0; i < num_in_dims; ++i) {
+            for (int i = 0; i < num_in_dims; ++i)
+            {
                 // Get the integer multiplier for dimension 'i'
                 isl_val *coef_val = isl_aff_get_coefficient_val(aff, isl_dim_in, i);
                 long coef = isl_val_get_num_si(coef_val);
                 isl_val_free(coef_val);
 
-                if (coef != 0) {
+                if (coef != 0)
+                {
                     if (!is_first) index_expr += " + ";
 
-                    if (coef == 1) {
+                    if (coef == 1)
+                    {
                         index_expr += "vi" + std::to_string(i);
-                    } else {
+                    }
+                    else
+                    {
                         index_expr += std::to_string(coef) + " * vi" + std::to_string(i);
                     }
                     is_first = false;
@@ -149,7 +160,8 @@ namespace latensor
             long const_term = isl_val_get_num_si(const_val);
             isl_val_free(const_val);
 
-            if (const_term != 0) {
+            if (const_term != 0)
+            {
                 if (!is_first) index_expr += " + ";
                 index_expr += std::to_string(const_term);
 
@@ -242,7 +254,7 @@ namespace latensor
                 isl::pw_multi_aff pma = isl::pw_multi_aff::from_map(access_map);
                 mem_info.access_str = buildMathematicalAccess(MA);
                 errs() << "aaaaaaaaaa " << mem_info.array_name << " " << mem_info.is_read << " "
-                    << mem_info.is_write << " " << mem_info.access_str << "\n";
+                       << mem_info.is_write << " " << mem_info.access_str << "\n";
 
                 this->mem_accesses.push_back(mem_info);
             }
@@ -283,20 +295,28 @@ namespace latensor
     // AND sink tuples equal `name`. Returns null isl::map if no such map exists.
     static isl::map extractSelfMap(const isl::union_map &UM, const std::string &name)
     {
-        struct Ctx { std::string name; isl_map *result; };
+        struct Ctx
+        {
+            std::string name;
+            isl_map *result;
+        };
         Ctx ctx{name, nullptr};
         isl_union_map_foreach_map(UM.get(),
-                [](isl_map *m, void *user) -> isl_stat {
-                auto *c = static_cast<Ctx *>(user);
-                const char *src = isl_map_get_tuple_name(m, isl_dim_in);
-                const char *snk = isl_map_get_tuple_name(m, isl_dim_out);
-                if (src && snk && c->name == src && c->name == snk) {
-                c->result = c->result ? isl_map_union(c->result, m) : m;
-                } else {
-                isl_map_free(m);
-                }
-                return isl_stat_ok;
-                }, &ctx);
+                                  [](isl_map *m, void *user) -> isl_stat
+                                  {
+                                      auto *c = static_cast<Ctx *>(user);
+                                      const char *src = isl_map_get_tuple_name(m, isl_dim_in);
+                                      const char *snk = isl_map_get_tuple_name(m, isl_dim_out);
+                                      if (src && snk && c->name == src && c->name == snk)
+                                      {
+                                          c->result = c->result ? isl_map_union(c->result, m) : m;
+                                      }
+                                      else
+                                      {
+                                          isl_map_free(m);
+                                      }
+                                      return isl_stat_ok;
+                                  }, &ctx);
         return ctx.result ? isl::manage(ctx.result) : isl::map();
     }
 
@@ -328,14 +348,15 @@ namespace latensor
     // (true; intra-stmt deps) or merely exist (false; any stmt -- outgoing
     // queries).
     static isl::union_map filterAccessDeps(const isl::union_map &UM,
-            const std::string &stmtName,
-            const std::string &srcAcc,
-            const std::string &sinkAcc,
-            const std::string &sinkAccNot,
-            bool sinkStmtMustBeSame,
-            bool acceptPlain)
+                                           const std::string &stmtName,
+                                           const std::string &srcAcc,
+                                           const std::string &sinkAcc,
+                                           const std::string &sinkAccNot,
+                                           bool sinkStmtMustBeSame,
+                                           bool acceptPlain)
     {
-        struct Ctx {
+        struct Ctx
+        {
             const std::string *stmtName;
             const std::string *srcAcc;
             const std::string *sinkAcc;
@@ -346,73 +367,79 @@ namespace latensor
         };
         isl_ctx *ictx = isl_union_map_get_ctx(UM.get());
         Ctx ctx{&stmtName, &srcAcc, &sinkAcc, &sinkAccNot, sinkStmtMustBeSame,
-            acceptPlain,
-            isl_union_map_empty(isl_space_params_alloc(ictx, 0))};
+                acceptPlain,
+                isl_union_map_empty(isl_space_params_alloc(ictx, 0))};
 
         isl_union_map_foreach_map(UM.get(),
-                [](isl_map *m, void *user) -> isl_stat {
-                auto *c = static_cast<Ctx *>(user);
+                                  [](isl_map *m, void *user) -> isl_stat
+                                  {
+                                      auto *c = static_cast<Ctx *>(user);
 
-                isl_space *sp = isl_map_get_space(m);
-                isl_space *dom_sp = isl_space_domain(isl_space_copy(sp));
-                isl_space *rng_sp = isl_space_range(sp);
+                                      isl_space *sp = isl_map_get_space(m);
+                                      isl_space *dom_sp = isl_space_domain(isl_space_copy(sp));
+                                      isl_space *rng_sp = isl_space_range(sp);
 
-                bool wrapped = isl_space_is_wrapping(dom_sp) && isl_space_is_wrapping(rng_sp);
+                                      bool wrapped = isl_space_is_wrapping(dom_sp) && isl_space_is_wrapping(rng_sp);
 
-                if (!wrapped) {
-                isl_space_free(dom_sp);
-                isl_space_free(rng_sp);
-                if (!c->acceptPlain) {
-                isl_map_free(m);
-                return isl_stat_ok;
-                }
-                // Plain map (no access tags). We can't verify access-tag
-                // constraints, so we keep the dep based on stmt names alone
-                // and rely on prop3 / IR-level checks downstream to filter
-                // out wrong attributions to non-accumulator writes.
-                const char *src = isl_map_get_tuple_name(m, isl_dim_in);
-                const char *snk = isl_map_get_tuple_name(m, isl_dim_out);
-                bool keep = src && *c->stmtName == src;
-                if (keep) {
-                    bool stmt_eq = snk && *c->stmtName == snk;
-                    keep = c->sinkStmtMustBeSame ? stmt_eq : (bool)snk;
-                }
-                if (keep) c->out = isl_union_map_add_map(c->out, m);
-                else      isl_map_free(m);
-                return isl_stat_ok;
-                }
+                                      if (!wrapped)
+                                      {
+                                          isl_space_free(dom_sp);
+                                          isl_space_free(rng_sp);
+                                          if (!c->acceptPlain)
+                                          {
+                                              isl_map_free(m);
+                                              return isl_stat_ok;
+                                          }
+                                          // Plain map (no access tags). We can't verify access-tag
+                                          // constraints, so we keep the dep based on stmt names alone
+                                          // and rely on prop3 / IR-level checks downstream to filter
+                                          // out wrong attributions to non-accumulator writes.
+                                          const char *src = isl_map_get_tuple_name(m, isl_dim_in);
+                                          const char *snk = isl_map_get_tuple_name(m, isl_dim_out);
+                                          bool keep = src && *c->stmtName == src;
+                                          if (keep)
+                                          {
+                                              bool stmt_eq = snk && *c->stmtName == snk;
+                                              keep = c->sinkStmtMustBeSame ? stmt_eq : (bool) snk;
+                                          }
+                                          if (keep) c->out = isl_union_map_add_map(c->out, m);
+                                          else isl_map_free(m);
+                                          return isl_stat_ok;
+                                      }
 
-                isl_space *dom_uw = isl_space_unwrap(dom_sp);
-                isl_space *rng_uw = isl_space_unwrap(rng_sp);
+                                      isl_space *dom_uw = isl_space_unwrap(dom_sp);
+                                      isl_space *rng_uw = isl_space_unwrap(rng_sp);
 
-                const char *src_stmt = isl_space_get_tuple_name(dom_uw, isl_dim_in);
-                const char *src_acc  = isl_space_get_tuple_name(dom_uw, isl_dim_out);
-                const char *snk_stmt = isl_space_get_tuple_name(rng_uw, isl_dim_in);
-                const char *snk_acc  = isl_space_get_tuple_name(rng_uw, isl_dim_out);
+                                      const char *src_stmt = isl_space_get_tuple_name(dom_uw, isl_dim_in);
+                                      const char *src_acc = isl_space_get_tuple_name(dom_uw, isl_dim_out);
+                                      const char *snk_stmt = isl_space_get_tuple_name(rng_uw, isl_dim_in);
+                                      const char *snk_acc = isl_space_get_tuple_name(rng_uw, isl_dim_out);
 
-                bool keep = src_stmt && *c->stmtName == src_stmt;
-                if (keep) {
-                    bool stmt_eq = snk_stmt && *c->stmtName == snk_stmt;
-                    keep = c->sinkStmtMustBeSame ? stmt_eq : (bool)snk_stmt;
-                }
-                if (keep && !c->srcAcc->empty())     keep = src_acc && *c->srcAcc == src_acc;
-                if (keep && !c->sinkAcc->empty())    keep = snk_acc && *c->sinkAcc == snk_acc;
-                if (keep && !c->sinkAccNot->empty()) keep = snk_acc && *c->sinkAccNot != snk_acc;
+                                      bool keep = src_stmt && *c->stmtName == src_stmt;
+                                      if (keep)
+                                      {
+                                          bool stmt_eq = snk_stmt && *c->stmtName == snk_stmt;
+                                          keep = c->sinkStmtMustBeSame ? stmt_eq : (bool) snk_stmt;
+                                      }
+                                      if (keep && !c->srcAcc->empty()) keep = src_acc && *c->srcAcc == src_acc;
+                                      if (keep && !c->sinkAcc->empty()) keep = snk_acc && *c->sinkAcc == snk_acc;
+                                      if (keep && !c->sinkAccNot->empty()) keep = snk_acc && *c->sinkAccNot != snk_acc;
 
-                isl_space_free(dom_uw);
-                isl_space_free(rng_uw);
+                                      isl_space_free(dom_uw);
+                                      isl_space_free(rng_uw);
 
-                if (keep) {
-                    // [Stmt[i] -> Acc[]] -> [Stmt[j] -> Acc[]]
-                    //   --domain_factor_domain--> Stmt[i] -> [Stmt[j] -> Acc[]]
-                    //   --range_factor_domain---> Stmt[i] -> Stmt[j]
-                    isl_map *step1 = isl_map_domain_factor_domain(isl_map_copy(m));
-                    isl_map *step2 = isl_map_range_factor_domain(step1);
-                    c->out = isl_union_map_add_map(c->out, step2);
-                }
-                isl_map_free(m);
-                return isl_stat_ok;
-                }, &ctx);
+                                      if (keep)
+                                      {
+                                          // [Stmt[i] -> Acc[]] -> [Stmt[j] -> Acc[]]
+                                          //   --domain_factor_domain--> Stmt[i] -> [Stmt[j] -> Acc[]]
+                                          //   --range_factor_domain---> Stmt[i] -> Stmt[j]
+                                          isl_map *step1 = isl_map_domain_factor_domain(isl_map_copy(m));
+                                          isl_map *step2 = isl_map_range_factor_domain(step1);
+                                          c->out = isl_union_map_add_map(c->out, step2);
+                                      }
+                                      isl_map_free(m);
+                                      return isl_stat_ok;
+                                  }, &ctx);
 
         return isl::manage(ctx.out);
     }
@@ -424,27 +451,34 @@ namespace latensor
     // itself is the accumulator value and (b) recursing into a phi's operands
     // loops via the back-edge.
     static int countAccumLoads(llvm::Value *Val,
-            polly::ScopStmt *Stmt,
-            polly::MemoryAccess *WriteMA)
+                               polly::ScopStmt *Stmt,
+                               polly::MemoryAccess *WriteMA)
     {
         if (!Val) return 0;
-        if (auto *Load = llvm::dyn_cast<llvm::LoadInst>(Val)) {
-            for (polly::MemoryAccess *MA : *Stmt) {
-                if (MA->getAccessInstruction() == Load) {
+        if (auto *Load = llvm::dyn_cast<llvm::LoadInst>(Val))
+        {
+            for (polly::MemoryAccess *MA: *Stmt)
+            {
+                if (MA->getAccessInstruction() == Load)
+                {
                     return MA->getAccessRelation().is_equal(WriteMA->getAccessRelation()) ? 1 : 0;
                 }
             }
             return 0;
         }
-        if (auto *Phi = llvm::dyn_cast<llvm::PHINode>(Val)) {
-            for (polly::MemoryAccess *MA : *Stmt) {
-                if (MA->getAccessInstruction() == Phi) {
+        if (auto *Phi = llvm::dyn_cast<llvm::PHINode>(Val))
+        {
+            for (polly::MemoryAccess *MA: *Stmt)
+            {
+                if (MA->getAccessInstruction() == Phi)
+                {
                     return MA->getAccessRelation().is_equal(WriteMA->getAccessRelation()) ? 1 : 0;
                 }
             }
             return 0;
         }
-        if (auto *I = llvm::dyn_cast<llvm::Instruction>(Val)) {
+        if (auto *I = llvm::dyn_cast<llvm::Instruction>(Val))
+        {
             int sum = 0;
             for (unsigned i = 0; i < I->getNumOperands(); ++i)
                 sum += countAccumLoads(I->getOperand(i), Stmt, WriteMA);
@@ -457,29 +491,36 @@ namespace latensor
     // PHINode) whose Polly MemoryAccess has an access relation equal to
     // WriteMA's. PHI nodes are treated as leaves (see countAccumLoads).
     static llvm::Instruction *findAccumLoadInTree(llvm::Value *Val,
-            polly::ScopStmt *Stmt,
-            polly::MemoryAccess *WriteMA)
+                                                  polly::ScopStmt *Stmt,
+                                                  polly::MemoryAccess *WriteMA)
     {
         if (!Val) return nullptr;
-        if (auto *Load = llvm::dyn_cast<llvm::LoadInst>(Val)) {
-            for (polly::MemoryAccess *MA : *Stmt) {
-                if (MA->getAccessInstruction() == Load) {
+        if (auto *Load = llvm::dyn_cast<llvm::LoadInst>(Val))
+        {
+            for (polly::MemoryAccess *MA: *Stmt)
+            {
+                if (MA->getAccessInstruction() == Load)
+                {
                     return MA->getAccessRelation().is_equal(WriteMA->getAccessRelation())
-                        ? (llvm::Instruction *)Load : nullptr;
+                           ? (llvm::Instruction *) Load : nullptr;
                 }
             }
             return nullptr;
         }
-        if (auto *Phi = llvm::dyn_cast<llvm::PHINode>(Val)) {
-            for (polly::MemoryAccess *MA : *Stmt) {
-                if (MA->getAccessInstruction() == Phi) {
+        if (auto *Phi = llvm::dyn_cast<llvm::PHINode>(Val))
+        {
+            for (polly::MemoryAccess *MA: *Stmt)
+            {
+                if (MA->getAccessInstruction() == Phi)
+                {
                     return MA->getAccessRelation().is_equal(WriteMA->getAccessRelation())
-                        ? (llvm::Instruction *)Phi : nullptr;
+                           ? (llvm::Instruction *) Phi : nullptr;
                 }
             }
             return nullptr;
         }
-        if (auto *I = llvm::dyn_cast<llvm::Instruction>(Val)) {
+        if (auto *I = llvm::dyn_cast<llvm::Instruction>(Val))
+        {
             for (unsigned i = 0; i < I->getNumOperands(); ++i)
                 if (auto *got = findAccumLoadInTree(I->getOperand(i), Stmt, WriteMA))
                     return got;
@@ -492,7 +533,7 @@ namespace latensor
     static polly::MemoryAccess *getMAForAccessInst(polly::ScopStmt *Stmt, llvm::Instruction *I)
     {
         if (!I) return nullptr;
-        for (polly::MemoryAccess *MA : *Stmt)
+        for (polly::MemoryAccess *MA: *Stmt)
             if (MA->getAccessInstruction() == I) return MA;
         return nullptr;
     }
@@ -509,7 +550,8 @@ namespace latensor
         isl::set deltas = selfRAW.deltas();
         unsigned n = isl_set_dim(deltas.get(), isl_dim_set);
 
-        for (unsigned d = 0; d < n; ++d) {
+        for (unsigned d = 0; d < n; ++d)
+        {
             isl_set *proj = isl_set_copy(deltas.get());
             if (n > d + 1)
                 proj = isl_set_project_out(proj, isl_dim_set, d + 1, n - d - 1);
@@ -544,199 +586,220 @@ namespace latensor
     }
 
     static std::vector<ClassifyResult>
-        classifyStmt(polly::ScopStmt &Stmt, const polly::Dependences &Deps)
+    classifyStmt(polly::ScopStmt &Stmt, const polly::Dependences &Deps)
+    {
+        std::vector<ClassifyResult> results;
+
+        const char *raw_name = isl_set_get_tuple_name(Stmt.getDomain().get());
+        std::string name = raw_name ? raw_name : "";
+
+        // Collect every write we'll consider (arrays + scalar accumulators).
+        // if we have a computation such as A[i] = A[i] + B[j], then
+        // a "MemoryAccess" is basically one single "A[i]" or "B[j]" from this
+        // computation
+        std::vector<polly::MemoryAccess *> writes;
+        bool pollyReductionLike = false;
+        for (polly::MemoryAccess *MA: Stmt)
         {
-            std::vector<ClassifyResult> results;
+            if (isCandidateWrite(MA)) writes.push_back(MA);
+            if (MA->isArrayKind() && MA->isReductionLike()) pollyReductionLike = true;
+        }
 
-            const char *raw_name = isl_set_get_tuple_name(Stmt.getDomain().get());
-            std::string name = raw_name ? raw_name : "";
-
-            // Collect every write we'll consider (arrays + scalar accumulators).
-            // if we have a computation such as A[i] = A[i] + B[j], then
-            // a "MemoryAccess" is basically one single "A[i]" or "B[j]" from this
-            // computation
-            std::vector<polly::MemoryAccess *> writes;
-            bool pollyReductionLike = false;
-            for (polly::MemoryAccess *MA : Stmt) {
-                if (isCandidateWrite(MA)) writes.push_back(MA);
-                if (MA->isArrayKind() && MA->isReductionLike()) pollyReductionLike = true;
-            }
-
-            if (writes.empty()) {
-                errs() << "      [classifyStmt] " << name << ": no candidate writes\n";
-                return results;
-            }
-
-            // Pre-fetch the four dep maps once. These come at AL_Access granularity:
-            // each map has wrapped tuples [Stmt[i] -> Acc[]] -> [Stmt[j] -> Acc[]].
-            // TYPE_RED holds reduction-pattern deps that Polly stripped from the
-            // standard RAW/WAR/WAW buckets when it recognized a clean reduction.
-            isl::union_map raw = Deps.getDependences(polly::Dependences::TYPE_RAW);
-            isl::union_map war = Deps.getDependences(polly::Dependences::TYPE_WAR);
-            isl::union_map waw = Deps.getDependences(polly::Dependences::TYPE_WAW);
-            isl::union_map red = Deps.getDependences(polly::Dependences::TYPE_RED);
-
-            for (polly::MemoryAccess *WriteMA : writes) {
-                ClassifyResult R{WriteMA, spatial, {}};
-                std::string accW = getAccName(WriteMA);
-
-                // --- Property 1: self-{RAW,WAR,WAW} on this specific write,
-                // OR any reduction-bucket dep involving this write. ---
-                // At AL_Access we filter by access tag rather than by access-
-                // relation domain restriction, which can't disambiguate two
-                // writes that share the same iteration space. Plain (un-tagged)
-                // deps are also accepted -- Polly emits these for scalar /
-                // scalar-promoted accesses, e.g., reduction_2d's S[0] reduction
-                // lives only in plain TYPE_RED. Misattribution to the wrong
-                // write is filtered out by prop3.
-                isl::union_map rawW = filterAccessDeps(raw, name, accW, "", "", true,  /*acceptPlain=*/true);
-                isl::union_map wawW = filterAccessDeps(waw, name, accW, "", "", true,  /*acceptPlain=*/true);
-                isl::union_map warW = filterAccessDeps(war, name, "",   accW, "", true, /*acceptPlain=*/true);
-                isl::union_map redSrcW  = filterAccessDeps(red, name, accW, "", "", true, /*acceptPlain=*/true);
-                isl::union_map redSinkW = filterAccessDeps(red, name, "",   accW, "", true, /*acceptPlain=*/true);
-
-                isl::map selfRAW    = extractSelfMap(rawW,     name);
-                isl::map selfWAR    = extractSelfMap(warW,     name);
-                isl::map selfWAW    = extractSelfMap(wawW,     name);
-                isl::map selfREDsrc = extractSelfMap(redSrcW,  name);
-                isl::map selfREDsnk = extractSelfMap(redSinkW, name);
-
-                bool hasRAW = !selfRAW.is_null() && !selfRAW.is_empty();
-                bool hasWAR = !selfWAR.is_null() && !selfWAR.is_empty();
-                bool hasWAW = !selfWAW.is_null() && !selfWAW.is_empty();
-                bool hasRED = (!selfREDsrc.is_null() && !selfREDsrc.is_empty())
-                    || (!selfREDsnk.is_null() && !selfREDsnk.is_empty());
-
-                // Either Polly recognized this write as part of a reduction
-                // (deps live in TYPE_RED) OR all three classical AK self-deps
-                // are present (handles complicated/non-Polly-recognized cases).
-                bool prop1 = hasRED || (hasRAW && hasWAR && hasWAW);
-
-                // Cross-check Polly only for array-kind writes; scalar MKs make this noisy.
-                if (WriteMA->isArrayKind() && pollyReductionLike != prop1) {
-                    errs() << "      [classifyStmt] " << name
-                        << " (write @ " << WriteMA << "): Polly reductionLike="
-                        << pollyReductionLike << " disagrees with prop1=" << prop1
-                        << " (using our analysis)\n"
-                        << "        RAW=" << hasRAW << " WAR=" << hasWAR
-                        << " WAW=" << hasWAW << " RED=" << hasRED << "\n";
-                }
-
-                if (!prop1) {
-                    results.push_back(R); // spatial
-                    continue;
-                }
-
-                // --- Property 3: exactly one read of THIS accumulator location
-                // in the RHS. Also remember the accumulator-read MA so prop2
-                // can exclude it. ---
-                polly::MemoryAccess *accumReadMA = nullptr;
-                auto *StoreI = llvm::dyn_cast<llvm::StoreInst>(WriteMA->getAccessInstruction());
-                if (!StoreI) {
-                    // Scalar/synthetic write (MK_Value/MK_PHI). Walk every
-                    // instruction in the stmt for accumulator loads.
-                    int accumLoads = 0;
-                    for (llvm::Instruction *I : Stmt.getInstructions())
-                        accumLoads += countAccumLoads(I, &Stmt, WriteMA);
-                    if (accumLoads != 1) {
-                        errs() << "      [classifyStmt] " << name
-                            << " (write @ " << WriteMA << "): scalar/synthetic write with "
-                            << accumLoads << " accumulator reads -- skipping (spatial)\n";
-                        results.push_back(R);
-                        continue;
-                    }
-                    for (llvm::Instruction *I : Stmt.getInstructions())
-                        if (auto *L = findAccumLoadInTree(I, &Stmt, WriteMA)) {
-                            accumReadMA = getMAForAccessInst(&Stmt, L);
-                            break;
-                        }
-                } else {
-                    llvm::Value *RHS = StoreI->getValueOperand();
-                    int accumLoads = countAccumLoads(RHS, &Stmt, WriteMA);
-                    if (accumLoads != 1) {
-                        errs() << "      [classifyStmt] " << name
-                            << " (write @ " << WriteMA << "): complicated reduction "
-                            << "(accumulator read " << accumLoads
-                            << " times in RHS, expected 1) -- skipping (spatial)\n";
-                        results.push_back(R);
-                        continue;
-                    }
-                    accumReadMA = getMAForAccessInst(&Stmt, findAccumLoadInTree(RHS, &Stmt, WriteMA));
-                }
-
-                // Carrier axes: prefer selfRED (when Polly recognized and
-                // stripped the deps), fall back to selfRAW.
-                const isl::map &carrierMap =
-                    (!selfREDsrc.is_null() && !selfREDsrc.is_empty()) ? selfREDsrc : selfRAW;
-                R.red_axes = findCarrierAxes(carrierMap);
-
-                // --- Property 2: scan iff there's any consumer of the partial
-                // result OTHER than the accumulator's own re-read.
-                //
-                // Two complementary checks:
-                //   (a) Dep-map: a wrapped RAW from this write to a non-
-                //       accumulator sink access, in any stmt. Catches
-                //       inter-stmt scans where Polly kept producer/consumer
-                //       separate.
-                //   (b) IR-level: the accumulator-read load has more uses than
-                //       the one feeding its own store. Catches intra-stmt
-                //       scans where Polly merged producer & consumer into one
-                //       stmt (and early-cse coalesced both reads into one
-                //       LoadInst, so Polly's flow analysis sees only the
-                //       accumulator-pattern dep).
-                bool prop2_scan = false;
-
-                std::string accumReadName = accumReadMA ? getAccName(accumReadMA) : "";
-                isl::union_map outRAW = filterAccessDeps(raw, name, accW, "", accumReadName,
-                        /*sinkStmtMustBeSame=*/false, /*acceptPlain=*/false);
-                if (!outRAW.is_empty()) prop2_scan = true;
-
-                // IR-level check (a): the stored value (combiner output) has
-                // users besides this store. After early-cse, a post-store
-                // re-read of the accumulator location is replaced by the
-                // stored value -- so an external consumer of "the new partial
-                // result" shows up as an extra user of StoreI's value operand.
-                if (!prop2_scan && StoreI) {
-                    if (auto *NewVal = llvm::dyn_cast<llvm::Instruction>(
-                                StoreI->getValueOperand())) {
-                        if (std::distance(NewVal->user_begin(),
-                                    NewVal->user_end()) != 1) {
-                            prop2_scan = true;
-                        }
-                    }
-                }
-
-                // IR-level check (b): the accumulator-read load has users
-                // besides feeding the combiner. Catches the producer-after-
-                // consumer ordering where the consumer reads the *pre-write*
-                // accumulator value.
-                if (!prop2_scan && StoreI && accumReadMA) {
-                    if (auto *AccumLoad = llvm::dyn_cast<llvm::LoadInst>(
-                                accumReadMA->getAccessInstruction())) {
-                        if (std::distance(AccumLoad->user_begin(),
-                                    AccumLoad->user_end()) != 1) {
-                            prop2_scan = true;
-                        }
-                    }
-                }
-
-                if (prop2_scan) {
-                    if (R.red_axes.size() != 1) {
-                        errs() << "      [classifyStmt] " << name
-                            << " (write @ " << WriteMA << "): scan with "
-                            << R.red_axes.size()
-                            << " carrying axes -- outside scalar-accumulator assumption\n";
-                    }
-                    R.stmt_type = scan;
-                } else {
-                    R.stmt_type = reduction;
-                }
-
-                results.push_back(R);
-            }
-
+        if (writes.empty())
+        {
+            errs() << "      [classifyStmt] " << name << ": no candidate writes\n";
             return results;
         }
+
+        // Pre-fetch the four dep maps once. These come at AL_Access granularity:
+        // each map has wrapped tuples [Stmt[i] -> Acc[]] -> [Stmt[j] -> Acc[]].
+        // TYPE_RED holds reduction-pattern deps that Polly stripped from the
+        // standard RAW/WAR/WAW buckets when it recognized a clean reduction.
+        isl::union_map raw = Deps.getDependences(polly::Dependences::TYPE_RAW);
+        isl::union_map war = Deps.getDependences(polly::Dependences::TYPE_WAR);
+        isl::union_map waw = Deps.getDependences(polly::Dependences::TYPE_WAW);
+        isl::union_map red = Deps.getDependences(polly::Dependences::TYPE_RED);
+
+        for (polly::MemoryAccess *WriteMA: writes)
+        {
+            ClassifyResult R{WriteMA, spatial, {}};
+            std::string accW = getAccName(WriteMA);
+
+            // --- Property 1: self-{RAW,WAR,WAW} on this specific write,
+            // OR any reduction-bucket dep involving this write. ---
+            // At AL_Access we filter by access tag rather than by access-
+            // relation domain restriction, which can't disambiguate two
+            // writes that share the same iteration space. Plain (un-tagged)
+            // deps are also accepted -- Polly emits these for scalar /
+            // scalar-promoted accesses, e.g., reduction_2d's S[0] reduction
+            // lives only in plain TYPE_RED. Misattribution to the wrong
+            // write is filtered out by prop3.
+            isl::union_map rawW = filterAccessDeps(raw, name, accW, "", "", true,  /*acceptPlain=*/true);
+            isl::union_map wawW = filterAccessDeps(waw, name, accW, "", "", true,  /*acceptPlain=*/true);
+            isl::union_map warW = filterAccessDeps(war, name, "", accW, "", true, /*acceptPlain=*/true);
+            isl::union_map redSrcW = filterAccessDeps(red, name, accW, "", "", true, /*acceptPlain=*/true);
+            isl::union_map redSinkW = filterAccessDeps(red, name, "", accW, "", true, /*acceptPlain=*/true);
+
+            isl::map selfRAW = extractSelfMap(rawW, name);
+            isl::map selfWAR = extractSelfMap(warW, name);
+            isl::map selfWAW = extractSelfMap(wawW, name);
+            isl::map selfREDsrc = extractSelfMap(redSrcW, name);
+            isl::map selfREDsnk = extractSelfMap(redSinkW, name);
+
+            bool hasRAW = !selfRAW.is_null() && !selfRAW.is_empty();
+            bool hasWAR = !selfWAR.is_null() && !selfWAR.is_empty();
+            bool hasWAW = !selfWAW.is_null() && !selfWAW.is_empty();
+            bool hasRED = (!selfREDsrc.is_null() && !selfREDsrc.is_empty())
+                          || (!selfREDsnk.is_null() && !selfREDsnk.is_empty());
+
+            // Either Polly recognized this write as part of a reduction
+            // (deps live in TYPE_RED) OR all three classical AK self-deps
+            // are present (handles complicated/non-Polly-recognized cases).
+            bool prop1 = hasRED || (hasRAW && hasWAR && hasWAW);
+
+            // Cross-check Polly only for array-kind writes; scalar MKs make this noisy.
+            if (WriteMA->isArrayKind() && pollyReductionLike != prop1)
+            {
+                errs() << "      [classifyStmt] " << name
+                       << " (write @ " << WriteMA << "): Polly reductionLike="
+                       << pollyReductionLike << " disagrees with prop1=" << prop1
+                       << " (using our analysis)\n"
+                       << "        RAW=" << hasRAW << " WAR=" << hasWAR
+                       << " WAW=" << hasWAW << " RED=" << hasRED << "\n";
+            }
+
+            if (!prop1)
+            {
+                results.push_back(R); // spatial
+                continue;
+            }
+
+            // --- Property 3: exactly one read of THIS accumulator location
+            // in the RHS. Also remember the accumulator-read MA so prop2
+            // can exclude it. ---
+            polly::MemoryAccess *accumReadMA = nullptr;
+            auto *StoreI = llvm::dyn_cast<llvm::StoreInst>(WriteMA->getAccessInstruction());
+            if (!StoreI)
+            {
+                // Scalar/synthetic write (MK_Value/MK_PHI). Walk every
+                // instruction in the stmt for accumulator loads.
+                int accumLoads = 0;
+                for (llvm::Instruction *I: Stmt.getInstructions())
+                    accumLoads += countAccumLoads(I, &Stmt, WriteMA);
+                if (accumLoads != 1)
+                {
+                    errs() << "      [classifyStmt] " << name
+                           << " (write @ " << WriteMA << "): scalar/synthetic write with "
+                           << accumLoads << " accumulator reads -- skipping (spatial)\n";
+                    results.push_back(R);
+                    continue;
+                }
+                for (llvm::Instruction *I: Stmt.getInstructions())
+                    if (auto *L = findAccumLoadInTree(I, &Stmt, WriteMA))
+                    {
+                        accumReadMA = getMAForAccessInst(&Stmt, L);
+                        break;
+                    }
+            }
+            else
+            {
+                llvm::Value *RHS = StoreI->getValueOperand();
+                int accumLoads = countAccumLoads(RHS, &Stmt, WriteMA);
+                if (accumLoads != 1)
+                {
+                    errs() << "      [classifyStmt] " << name
+                           << " (write @ " << WriteMA << "): complicated reduction "
+                           << "(accumulator read " << accumLoads
+                           << " times in RHS, expected 1) -- skipping (spatial)\n";
+                    results.push_back(R);
+                    continue;
+                }
+                accumReadMA = getMAForAccessInst(&Stmt, findAccumLoadInTree(RHS, &Stmt, WriteMA));
+            }
+
+            // Carrier axes: prefer selfRED (when Polly recognized and
+            // stripped the deps), fall back to selfRAW.
+            const isl::map &carrierMap =
+                    (!selfREDsrc.is_null() && !selfREDsrc.is_empty()) ? selfREDsrc : selfRAW;
+            R.red_axes = findCarrierAxes(carrierMap);
+
+            // --- Property 2: scan iff there's any consumer of the partial
+            // result OTHER than the accumulator's own re-read.
+            //
+            // Two complementary checks:
+            //   (a) Dep-map: a wrapped RAW from this write to a non-
+            //       accumulator sink access, in any stmt. Catches
+            //       inter-stmt scans where Polly kept producer/consumer
+            //       separate.
+            //   (b) IR-level: the accumulator-read load has more uses than
+            //       the one feeding its own store. Catches intra-stmt
+            //       scans where Polly merged producer & consumer into one
+            //       stmt (and early-cse coalesced both reads into one
+            //       LoadInst, so Polly's flow analysis sees only the
+            //       accumulator-pattern dep).
+            bool prop2_scan = false;
+
+            std::string accumReadName = accumReadMA ? getAccName(accumReadMA) : "";
+            isl::union_map outRAW = filterAccessDeps(raw, name, accW, "", accumReadName,
+                    /*sinkStmtMustBeSame=*/false, /*acceptPlain=*/false);
+            if (!outRAW.is_empty()) prop2_scan = true;
+
+            // IR-level check (a): the stored value (combiner output) has
+            // users besides this store. After early-cse, a post-store
+            // re-read of the accumulator location is replaced by the
+            // stored value -- so an external consumer of "the new partial
+            // result" shows up as an extra user of StoreI's value operand.
+            if (!prop2_scan && StoreI)
+            {
+                if (auto *NewVal = llvm::dyn_cast<llvm::Instruction>(
+                        StoreI->getValueOperand()))
+                {
+                    if (std::distance(NewVal->user_begin(),
+                                      NewVal->user_end()) != 1)
+                    {
+                        prop2_scan = true;
+                    }
+                }
+            }
+
+            // IR-level check (b): the accumulator-read load has users
+            // besides feeding the combiner. Catches the producer-after-
+            // consumer ordering where the consumer reads the *pre-write*
+            // accumulator value.
+            if (!prop2_scan && StoreI && accumReadMA)
+            {
+                if (auto *AccumLoad = llvm::dyn_cast<llvm::LoadInst>(
+                        accumReadMA->getAccessInstruction()))
+                {
+                    if (std::distance(AccumLoad->user_begin(),
+                                      AccumLoad->user_end()) != 1)
+                    {
+                        prop2_scan = true;
+                    }
+                }
+            }
+
+            if (prop2_scan)
+            {
+                if (R.red_axes.size() != 1)
+                {
+                    errs() << "      [classifyStmt] " << name
+                           << " (write @ " << WriteMA << "): scan with "
+                           << R.red_axes.size()
+                           << " carrying axes -- outside scalar-accumulator assumption\n";
+                }
+                R.stmt_type = scan;
+            }
+            else
+            {
+                R.stmt_type = reduction;
+            }
+
+            results.push_back(R);
+        }
+
+        return results;
+    }
 
 
     // 1. Inherit from PassInfoMixin instead of FunctionPass
@@ -759,12 +822,12 @@ namespace latensor
             errs() << "Function: " << F.getName() << "\n";
 
             polly::ScopStandardAnalysisResults AR = {
-                FAM.getResult<llvm::DominatorTreeAnalysis>(F),
-                SI,
-                FAM.getResult<llvm::ScalarEvolutionAnalysis>(F),
-                FAM.getResult<llvm::LoopAnalysis>(F),
-                FAM.getResult<llvm::RegionInfoAnalysis>(F),
-                FAM.getResult<llvm::TargetIRAnalysis>(F)
+                    FAM.getResult<llvm::DominatorTreeAnalysis>(F),
+                    SI,
+                    FAM.getResult<llvm::ScalarEvolutionAnalysis>(F),
+                    FAM.getResult<llvm::LoopAnalysis>(F),
+                    FAM.getResult<llvm::RegionInfoAnalysis>(F),
+                    FAM.getResult<llvm::TargetIRAnalysis>(F)
             };
 
             for (auto &Entry: SI)
@@ -809,20 +872,24 @@ namespace latensor
                     for (Instruction *I: Stmt.getInstructions())
                         errs() << "      Inst: " << *I << "\n";
 
-                    for (polly::MemoryAccess *MA: Stmt) {
+                    for (polly::MemoryAccess *MA: Stmt)
+                    {
                         errs() << "      MemAccess: ";
                         MA->print(errs());
                         errs() << "\n";
                     }
 
-                    try {
+                    try
+                    {
                         std::vector<ClassifyResult> cr = classifyStmt(Stmt, Deps);
-                        for (const auto &r : cr) {
-                            const char *kind = (r.stmt_type == scan)      ? "scan"
-                                : (r.stmt_type == reduction) ? "reduction"
-                                :                              "spatial";
+                        for (const auto &r: cr)
+                        {
+                            const char *kind = (r.stmt_type == scan) ? "scan"
+                                                                     : (r.stmt_type == reduction) ? "reduction"
+                                                                                                  : "spatial";
                             errs() << "      => write @ " << r.write << ": " << kind;
-                            if (!r.red_axes.empty()) {
+                            if (!r.red_axes.empty())
+                            {
                                 errs() << ", carrying dims [";
                                 for (size_t i = 0; i < r.red_axes.size(); ++i)
                                     errs() << (i ? ", " : "") << r.red_axes[i];
@@ -832,7 +899,9 @@ namespace latensor
                         }
                         if (!cr.empty())
                             stmt_classification[&Stmt] = std::move(cr);
-                    } catch (const std::runtime_error &e) {
+                    }
+                    catch (const std::runtime_error &e)
+                    {
                         errs() << "      ERROR: " << e.what() << "\n";
                     }
                 }
@@ -846,100 +915,100 @@ namespace latensor
 
         // The main recursive walker
         std::vector<std::shared_ptr<TreeNode>>
-            walkAST(isl::ast_node Node, std::vector<std::shared_ptr<LoopInfo>> loop_backtrace)
+        walkAST(isl::ast_node Node, std::vector<std::shared_ptr<LoopInfo>> loop_backtrace)
+        {
+            std::vector<std::shared_ptr<TreeNode>> result;
+
+            if (Node.is_null())
+                return result;
+
+            // 1. IS THIS A FOR LOOP?
+            if (isl_ast_node_get_type(Node.get()) == isl_ast_node_for)
             {
-                std::vector<std::shared_ptr<TreeNode>> result;
+                auto current_loop = std::make_shared<LoopInfo>();
+                bool found = get_loop_bound(Node, current_loop);
+                if (!found)
+                    throw std::runtime_error("LaTensor: Failed to convert -- loop bounds are not simple");
 
-                if (Node.is_null())
-                    return result;
+                errs() << "loop begin\n";
+                // Recurse into the body of the loop
 
-                // 1. IS THIS A FOR LOOP?
-                if (isl_ast_node_get_type(Node.get()) == isl_ast_node_for)
-                {
-                    auto current_loop = std::make_shared<LoopInfo>();
-                    bool found = get_loop_bound(Node, current_loop);
-                    if (!found)
-                        throw std::runtime_error("LaTensor: Failed to convert -- loop bounds are not simple");
+                errs() << isl_ast_node_to_str(Node.get()) << "\n";
+                isl::ast_node Body = isl::manage(isl_ast_node_for_get_body(Node.get()));
+                loop_backtrace.emplace_back(current_loop);
+                current_loop->children = walkAST(Body, loop_backtrace);
 
-                    errs() << "loop begin\n";
-                    // Recurse into the body of the loop
+                errs() << "loop end\n";
 
-                    errs() << isl_ast_node_to_str(Node.get()) << "\n";
-                    isl::ast_node Body = isl::manage(isl_ast_node_for_get_body(Node.get()));
-                    loop_backtrace.emplace_back(current_loop);
-                    current_loop->children = walkAST(Body, loop_backtrace);
-
-                    errs() << "loop end\n";
-
-                    result.push_back(current_loop);
-                }
+                result.push_back(current_loop);
+            }
 
                 // 2. IS THIS A BLOCK (SIDE-BY-SIDE SIBLINGS)?
-                else if (isl_ast_node_get_type(Node.get()) == isl_ast_node_block)
+            else if (isl_ast_node_get_type(Node.get()) == isl_ast_node_block)
+            {
+                isl::ast_node_list List = isl::manage(isl_ast_node_block_get_children(Node.get()));
+                int num_children = isl_ast_node_list_n_ast_node(List.get());
+
+                // Iterate through all siblings in this block
+                for (int i = 0; i < num_children; i++)
                 {
-                    isl::ast_node_list List = isl::manage(isl_ast_node_block_get_children(Node.get()));
-                    int num_children = isl_ast_node_list_n_ast_node(List.get());
+                    isl::ast_node ChildNode = isl::manage(isl_ast_node_list_get_ast_node(List.get(), i));
 
-                    // Iterate through all siblings in this block
-                    for (int i = 0; i < num_children; i++)
-                    {
-                        isl::ast_node ChildNode = isl::manage(isl_ast_node_list_get_ast_node(List.get(), i));
+                    errs() << "siblings begin\n";
+                    // Recurse and append all resulting loops to our current level
+                    auto siblings = walkAST(ChildNode, loop_backtrace);
+                    result.insert(result.end(), siblings.begin(), siblings.end());
+                    errs() << "siblings end\n";
 
-                        errs() << "siblings begin\n";
-                        // Recurse and append all resulting loops to our current level
-                        auto siblings = walkAST(ChildNode, loop_backtrace);
-                        result.insert(result.end(), siblings.begin(), siblings.end());
-                        errs() << "siblings end\n";
-
-                    }
                 }
+            }
 
                 // 3. IS THIS A COMPUTATION NODE (SCOPSTMT)?
-                else if (isl_ast_node_get_type(Node.get()) == isl_ast_node_user)
+            else if (isl_ast_node_get_type(Node.get()) == isl_ast_node_user)
+            {
+                // --- THE POLLY MAGIC TRICK ---
+                // Get the mathematical expression inside the node
+                isl::ast_expr Expr = isl::manage(isl_ast_node_user_get_expr(Node.get()));
+
+                // The first argument of the expression contains the ID
+                isl::ast_expr Arg = isl::manage(isl_ast_expr_get_op_arg(Expr.get(), 0));
+                isl::id Id = isl::manage(isl_ast_expr_get_id(Arg.get()));
+
+                // The user pointer of this ID is exactly our ScopStmt!
+                polly::ScopStmt *Stmt = static_cast<polly::ScopStmt *>(isl_id_get_user(Id.get()));
+
+                // Create a leaf node in your tree to hold this Block
+                auto leaf = std::make_shared<BlockInfo>(Stmt);
+                errs() << "a block!\n";
+                errs() << *Stmt << "\n";
+
+                for (const std::shared_ptr<LoopInfo> &li: loop_backtrace)
                 {
-                    // --- THE POLLY MAGIC TRICK ---
-                    // Get the mathematical expression inside the node
-                    isl::ast_expr Expr = isl::manage(isl_ast_node_user_get_expr(Node.get()));
-
-                    // The first argument of the expression contains the ID
-                    isl::ast_expr Arg = isl::manage(isl_ast_expr_get_op_arg(Expr.get(), 0));
-                    isl::id Id = isl::manage(isl_ast_expr_get_id(Arg.get()));
-
-                    // The user pointer of this ID is exactly our ScopStmt!
-                    polly::ScopStmt *Stmt = static_cast<polly::ScopStmt *>(isl_id_get_user(Id.get()));
-
-                    // Create a leaf node in your tree to hold this Block
-                    auto leaf = std::make_shared<BlockInfo>(Stmt);
-                    errs() << "a block!\n";
-                    errs() << *Stmt << "\n";
-
-                    for (const std::shared_ptr<LoopInfo> &li: loop_backtrace)
-                    {
-                        IterVarInfo thing = IterVarInfo(li);
-                        leaf->iter_vars.emplace_back(thing);
-                    }
-
-                    result.push_back(leaf);
+                    IterVarInfo thing = IterVarInfo(li);
+                    leaf->iter_vars.emplace_back(thing);
                 }
+
+                result.push_back(leaf);
+            }
 
                 // 4. IS THIS A MARK NODE (METADATA)?
-                else if (isl_ast_node_get_type(Node.get()) == isl_ast_node_mark)
-                {
-                    // Optional: You can extract the mark's name to see what optimization
-                    // Polly is suggesting (e.g., vectorization/parallelization)
-                    isl::id MarkId = isl::manage(isl_ast_node_mark_get_id(Node.get()));
-                    std::string mark_name = isl_id_get_name(MarkId.get());
-                    // llvm::errs() << "Found a mark: " << mark_name << "\n";
+            else if (isl_ast_node_get_type(Node.get()) == isl_ast_node_mark)
+            {
+                // Optional: You can extract the mark's name to see what optimization
+                // Polly is suggesting (e.g., vectorization/parallelization)
+                isl::id MarkId = isl::manage(isl_ast_node_mark_get_id(Node.get()));
+                std::string mark_name = isl_id_get_name(MarkId.get());
+                // llvm::errs() << "Found a mark: " << mark_name << "\n";
 
-                    // Peel off the mark wrapper to get the actual AST node inside
-                    isl::ast_node InnerNode = isl::manage(isl_ast_node_mark_get_node(Node.get()));
+                // Peel off the mark wrapper to get the actual AST node inside
+                isl::ast_node InnerNode = isl::manage(isl_ast_node_mark_get_node(Node.get()));
 
-                    // Recurse directly into the inner node and return its result!
-                    return walkAST(InnerNode, loop_backtrace);
-                }
-
-                return result;
+                // Recurse directly into the inner node and return its result!
+                return walkAST(InnerNode, loop_backtrace);
             }
+
+            return result;
+        }
 
         // Returns true if ast node has nice lower/upper bounds, and populates the treeNode values.
         static bool get_loop_bound(isl::ast_node &Node, const std::shared_ptr<LoopInfo> &tree_node)
@@ -998,31 +1067,31 @@ namespace latensor
 
     extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo
 llvmGetPassPluginInfo()
-{
-    return {
-        LLVM_PLUGIN_API_VERSION, "MyPollyScopPass", "0.1",
-            [](llvm::PassBuilder &PB)
-            {
+    {
+        return {
+                LLVM_PLUGIN_API_VERSION, "MyPollyScopPass", "0.1",
+                [](llvm::PassBuilder &PB)
+                {
 
-                // THE MAGIC LINE: Manually register Polly's analyses with the PassBuilder
-                polly::registerPollyPasses(PB);
+                    // THE MAGIC LINE: Manually register Polly's analyses with the PassBuilder
+                    polly::registerPollyPasses(PB);
 
-                // Keep your existing explicit parsing setup
-                PB.registerPipelineParsingCallback(
-                        [](llvm::StringRef Name,
-                            llvm::FunctionPassManager &FPM,
-                            llvm::ArrayRef<llvm::PassBuilder::PipelineElement>)
-                        {
-                        if (Name == "my-polly-scop-pass")
-                        {
-                        FPM.addPass(latensor::MyPollyScopPass());
-                        return true;
-                        }
-                        return false;
-                        });
-            }
-    };
-}
+                    // Keep your existing explicit parsing setup
+                    PB.registerPipelineParsingCallback(
+                            [](llvm::StringRef Name,
+                               llvm::FunctionPassManager &FPM,
+                               llvm::ArrayRef<llvm::PassBuilder::PipelineElement>)
+                            {
+                                if (Name == "my-polly-scop-pass")
+                                {
+                                    FPM.addPass(latensor::MyPollyScopPass());
+                                    return true;
+                                }
+                                return false;
+                            });
+                }
+        };
+    }
 
 /*
 Algorithm:
