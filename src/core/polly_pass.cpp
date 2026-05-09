@@ -12,6 +12,7 @@
 #include <isl/ast.h>
 
 #include <utility>
+#include <regex>
 #include "polly/DependenceInfo.h"  // For DependenceInfo, DependenceAnalysis, TYPE_RAW
 #include "polly/CodeGen/IslAst.h"          // For IslAstInfo, IslAstAnalysis
 #include "llvm/Analysis/RegionInfo.h"
@@ -250,13 +251,9 @@ namespace latensor
     // Helper to recursively reconstruct the math expression
     std::string buildComputeMath(llvm::Value *Val, polly::ScopStmt *Stmt)
     {
-        errs() << "begin\n";
-
         // 1. Is it a Load? (Base case)
         if (auto *Load = llvm::dyn_cast<llvm::LoadInst>(Val))
         {
-            errs() << "a\n";
-
             // Find which Polly MemoryAccess corresponds to this load
             for (polly::MemoryAccess *MA: *Stmt)
             {
@@ -271,9 +268,6 @@ namespace latensor
         // 2. Is it a mathematical operation? (Recursive case)
         if (auto *BinOp = llvm::dyn_cast<llvm::BinaryOperator>(Val))
         {
-            errs() << "b\n";
-            errs() << BinOp->getOpcode() << "\n";
-
             std::string op = "";
             switch (BinOp->getOpcode())
             {
@@ -303,13 +297,11 @@ namespace latensor
         // 3. Is it a Constant?
         if (auto *ConstFP = llvm::dyn_cast<llvm::ConstantFP>(Val))
         {
-            errs() << "c\n";
             return std::to_string(ConstFP->getValueAPF().convertToFloat());
         }
 
         // 4. Is it a Math Intrinsic (like fmaxf)?
         if (auto *IntrinsicCall = llvm::dyn_cast<llvm::IntrinsicInst>(Val)) {
-            errs() << "d\n";
             llvm::Intrinsic::ID ID = IntrinsicCall->getIntrinsicID();
 
             // Check if it's the fmaxf intrinsic (LLVM sometimes uses maxnum or maximum depending on fast-math flags)
@@ -412,6 +404,12 @@ namespace latensor
             // Combine all loop guards into one T.where!
             std::shared_ptr<latensor::LoopInfo> loop = this->parent_loop;
             std::string combined_guard = "";
+
+            for (auto iv: iter_vars)
+            {
+                s += "    " + iv.to_string() + "\n";
+            }
+
             while (loop)
             {
                 if (!loop->guard_condition.empty())
@@ -421,20 +419,27 @@ namespace latensor
                     else
                         combined_guard += " and ";
 
-                    combined_guard += loop->guard_condition;
+                    std::string g = loop->guard_condition;
+
+                    for (const auto& iv: iter_vars)
+                    {
+                        for (const AxisMultiplier& am: iv.linear_combination)
+                        {
+                            std::regex word_regex("\\b" + am.loop_var->name + "\\b");
+                            g = std::regex_replace(g, word_regex, iv.name);
+                        }
+                    }
+
+                    combined_guard += g;
                 }
 
                 loop = loop->parent;
             }
-            if (!combined_guard.empty())
-            {
-                s += "    " + combined_guard + ")\n";
-            }
 
-            for (auto iv: iter_vars)
-            {
-                s += "    " + iv.to_string() + "\n";
-            }
+
+            if (!combined_guard.empty())
+                s += "    " + combined_guard + ")\n";
+
             s += "    T.reads(";
             for (int i = 0; i < this->reads.size(); i++)
             {
@@ -1316,6 +1321,7 @@ namespace latensor
 
             // Save the expression string (e.g., "c0" or "0")
             lb_str = get_ast_expr_str(init_expr.get());
+            errs() << "lower: " << lb_str << "\n";
 
             // 3. EXTRACT UPPER BOUND
             isl::ast_expr cond_expr = isl::manage(isl_ast_node_for_get_cond(Node.get()));
@@ -1345,6 +1351,7 @@ namespace latensor
 
                 // Save the expression string (e.g., "2 * c0" or "10")
                 ub_str = get_ast_expr_str(ub_expr.get());
+                errs() << "upper: " << ub_str << "\n";
             }
             else
             {
