@@ -39,18 +39,18 @@ namespace latensor
     {
         long lower_bound;
         long upper_bound;
-        std::vector<std::shared_ptr<TreeNode>> children{};
+        std::vector <std::shared_ptr<TreeNode>> children{};
     };
 
     // for example, 2i
     struct AxisMultiplier
     {
         // i
-        std::shared_ptr<LoopInfo> loop_var;
+        std::shared_ptr <LoopInfo> loop_var;
         // 2
         int multiplier;
 
-        AxisMultiplier(std::shared_ptr<LoopInfo> loop_var, int mul)
+        AxisMultiplier(std::shared_ptr <LoopInfo> loop_var, int mul)
         {
             this->loop_var = std::move(loop_var);
             this->multiplier = mul;
@@ -61,13 +61,13 @@ namespace latensor
     struct IterVarInfo
     {
         // 2i, (+) 3j
-        std::vector<AxisMultiplier> linear_combination{};
+        std::vector <AxisMultiplier> linear_combination{};
         // ... + 7
         int added_const;
         IterVarType type;
 
         // Default constructor, always sets linear combination to loop_var * 1 + 0
-        IterVarInfo(std::shared_ptr<LoopInfo> loop_var)
+        IterVarInfo(std::shared_ptr <LoopInfo> loop_var)
         {
             this->linear_combination.emplace_back(AxisMultiplier(std::move(loop_var), 1));
             this->added_const = 0;
@@ -228,10 +228,10 @@ namespace latensor
 
     struct BlockInfo : TreeNode
     {
-        std::vector<IterVarInfo> iter_vars;
-        std::vector<Stmt> stmts;
-        std::vector<MemoryAccessInfo> mem_accesses;
-        std::vector<TVMComputeStmt> compute_stmts;
+        std::vector <IterVarInfo> iter_vars;
+        std::vector <Stmt> stmts;
+        std::vector <MemoryAccessInfo> mem_accesses;
+        std::vector <TVMComputeStmt> compute_stmts;
 
         explicit BlockInfo(polly::ScopStmt *Stmt)
         {
@@ -585,10 +585,10 @@ namespace latensor
         return true;
     }
 
-    static std::vector<ClassifyResult>
+    static std::vector <ClassifyResult>
     classifyStmt(polly::ScopStmt &Stmt, const polly::Dependences &Deps)
     {
-        std::vector<ClassifyResult> results;
+        std::vector <ClassifyResult> results;
 
         const char *raw_name = isl_set_get_tuple_name(Stmt.getDomain().get());
         std::string name = raw_name ? raw_name : "";
@@ -597,7 +597,7 @@ namespace latensor
         // if we have a computation such as A[i] = A[i] + B[j], then
         // a "MemoryAccess" is basically one single "A[i]" or "B[j]" from this
         // computation
-        std::vector<polly::MemoryAccess *> writes;
+        std::vector < polly::MemoryAccess * > writes;
         bool pollyReductionLike = false;
         for (polly::MemoryAccess *MA: Stmt)
         {
@@ -641,6 +641,17 @@ namespace latensor
             isl::union_map redSinkW = filterAccessDeps(red, name, "", accW, "", true, /*acceptPlain=*/true);
 
             isl::map selfRAW = extractSelfMap(rawW, name);
+            // Drop zero-distance entries (source iter == sink iter). A real
+            // accumulator read must be fed by a write in a PREVIOUS
+            // iteration; same-iteration self-RAW would arise only in
+            // degenerate cases and is not evidence of a reduction.
+            if (!selfRAW.is_null())
+            {
+                isl_map *raw_c = isl_map_copy(selfRAW.get());
+                isl_set *dom_c = isl_map_domain(isl_map_copy(raw_c));
+                isl_map *id_c = isl_set_identity(dom_c);
+                selfRAW = isl::manage(isl_map_subtract(raw_c, id_c));
+            }
             isl::map selfWAR = extractSelfMap(warW, name);
             isl::map selfWAW = extractSelfMap(wawW, name);
             isl::map selfREDsrc = extractSelfMap(redSrcW, name);
@@ -676,7 +687,11 @@ namespace latensor
 
             // --- Property 3: exactly one read of THIS accumulator location
             // in the RHS. Also remember the accumulator-read MA so prop2
-            // can exclude it. ---
+            // can exclude it.
+            // This catches cases where there exists a loop-independent WAR
+            // dependency for the access we're focusing on, but the actual
+            // write computation doesn't use the read value (i.e. the read
+            // happened for an unrelated reason) ---
             polly::MemoryAccess *accumReadMA = nullptr;
             auto *StoreI = llvm::dyn_cast<llvm::StoreInst>(WriteMA->getAccessInstruction());
             if (!StoreI)
@@ -840,25 +855,18 @@ namespace latensor
                 auto &ASTInfo = SAM.getResult<polly::IslAstAnalysis>(*S, AR);
                 isl::ast_node RootNode = ASTInfo.getAst();
 
-                // 2. Build the entire tree of LoopInfos and BlockInfos!
-                std::vector<std::shared_ptr<TreeNode>> LoopTree = walkAST(RootNode, {});
-
-                // Now LoopTree contains your fully structured, nested hierarchy.
-
-                // 1. Let auto resolve the exact wrapper type returned by the Pass Manager
-                auto &DI = SAM.getResult<polly::DependenceAnalysis>(*S, AR);
-
-                // 2. Get the Dependences analysis object at the per-access level.
+                // 2. Get the Dependences analysis at per-access granularity.
                 // AL_Access is required so we can disambiguate which write within
                 // a multi-write ScopStmt produced each dependence -- crucial for
                 // detecting scans where Polly merged producer and consumer into
                 // a single ScopStmt.
+                auto &DI = SAM.getResult<polly::DependenceAnalysis>(*S, AR);
                 const polly::Dependences &Deps = DI.getDependences(polly::Dependences::AL_Access);
-
-                // 3. Extract the actual ISL union_map for the True (RAW) dependencies
                 isl::union_map TrueDeps = Deps.getDependences(polly::Dependences::TYPE_RAW);
 
-                std::map<polly::ScopStmt *, std::vector<ClassifyResult>> stmt_classification{};
+                // 3. Classify every Stmt up front so walkAST can stamp each
+                // surrounding loop's IterVarType when it reaches a user node.
+                std::map < polly::ScopStmt * , std::vector < ClassifyResult >> stmt_classification{};
 
                 for (polly::ScopStmt &Stmt: *S)
                 {
@@ -881,7 +889,7 @@ namespace latensor
 
                     try
                     {
-                        std::vector<ClassifyResult> cr = classifyStmt(Stmt, Deps);
+                        std::vector <ClassifyResult> cr = classifyStmt(Stmt, Deps);
                         for (const auto &r: cr)
                         {
                             const char *kind = (r.stmt_type == scan) ? "scan"
@@ -906,6 +914,11 @@ namespace latensor
                     }
                 }
 
+                // 4. Build the LoopInfo/BlockInfo tree, consulting
+                // stmt_classification at each user node.
+                std::vector <std::shared_ptr<TreeNode>> LoopTree =
+                        walkAST(RootNode, {}, stmt_classification);
+
                 S->print(llvm::errs(), false);
             }
 
@@ -914,10 +927,14 @@ namespace latensor
         }
 
         // The main recursive walker
-        std::vector<std::shared_ptr<TreeNode>>
-        walkAST(isl::ast_node Node, std::vector<std::shared_ptr<LoopInfo>> loop_backtrace)
+        std::vector <std::shared_ptr<TreeNode>>
+        walkAST(isl::ast_node Node,
+                std::vector <std::shared_ptr<LoopInfo>> loop_backtrace,
+                const std::map<polly::ScopStmt *, std::vector < ClassifyResult>>
+
+                &stmt_classification)
         {
-            std::vector<std::shared_ptr<TreeNode>> result;
+            std::vector <std::shared_ptr<TreeNode>> result;
 
             if (Node.is_null())
                 return result;
@@ -936,7 +953,7 @@ namespace latensor
                 errs() << isl_ast_node_to_str(Node.get()) << "\n";
                 isl::ast_node Body = isl::manage(isl_ast_node_for_get_body(Node.get()));
                 loop_backtrace.emplace_back(current_loop);
-                current_loop->children = walkAST(Body, loop_backtrace);
+                current_loop->children = walkAST(Body, loop_backtrace, stmt_classification);
 
                 errs() << "loop end\n";
 
@@ -956,7 +973,7 @@ namespace latensor
 
                     errs() << "siblings begin\n";
                     // Recurse and append all resulting loops to our current level
-                    auto siblings = walkAST(ChildNode, loop_backtrace);
+                    auto siblings = walkAST(ChildNode, loop_backtrace, stmt_classification);
                     result.insert(result.end(), siblings.begin(), siblings.end());
                     errs() << "siblings end\n";
 
@@ -982,10 +999,40 @@ namespace latensor
                 errs() << "a block!\n";
                 errs() << *Stmt << "\n";
 
-                for (const std::shared_ptr<LoopInfo> &li: loop_backtrace)
+                // One IterVarInfo per surrounding loop, defaulting to spatial.
+                for (const std::shared_ptr <LoopInfo> &li: loop_backtrace)
+                    leaf->iter_vars.emplace_back(IterVarInfo(li));
+
+                // Stamp reduction/scan axes from classifyStmt onto the
+                // matching loops. Stmts with no entry stay all-spatial.
+                auto it = stmt_classification.find(Stmt);
+                if (it != stmt_classification.end())
                 {
-                    IterVarInfo thing = IterVarInfo(li);
-                    leaf->iter_vars.emplace_back(thing);
+                    // AST loop nesting depth must match the Stmt's domain
+                    // dim count for the 1:1 red_axes -> loop_backtrace
+                    // indexing to be valid. Non-identity Polly schedules
+                    // (tiling, fusion) would break this.
+                    if (loop_backtrace.size() != Stmt->getNumIterators())
+                        throw std::runtime_error(
+                                "LaTensor: AST loop depth does not match Stmt "
+                                "iteration domain dim count -- non-identity "
+                                "Polly schedule is not supported");
+
+                    for (const ClassifyResult &cr: it->second)
+                    {
+                        if (cr.stmt_type == spatial) continue;
+                        for (unsigned d: cr.red_axes)
+                        {
+                            IterVarType &slot = leaf->iter_vars[d].type;
+                            if (slot == spatial)
+                                slot = cr.stmt_type;
+                            else if (slot != cr.stmt_type)
+                                throw std::runtime_error(
+                                        "LaTensor: axis classified as both "
+                                        "reduction and scan by different writes "
+                                        "in the same Stmt -- unsupported");
+                        }
+                    }
                 }
 
                 result.push_back(leaf);
@@ -1004,14 +1051,14 @@ namespace latensor
                 isl::ast_node InnerNode = isl::manage(isl_ast_node_mark_get_node(Node.get()));
 
                 // Recurse directly into the inner node and return its result!
-                return walkAST(InnerNode, loop_backtrace);
+                return walkAST(InnerNode, loop_backtrace, stmt_classification);
             }
 
             return result;
         }
 
         // Returns true if ast node has nice lower/upper bounds, and populates the treeNode values.
-        static bool get_loop_bound(isl::ast_node &Node, const std::shared_ptr<LoopInfo> &tree_node)
+        static bool get_loop_bound(isl::ast_node &Node, const std::shared_ptr <LoopInfo> &tree_node)
         {
             long lower = 0;
             long upper = 0;
@@ -1065,35 +1112,39 @@ namespace latensor
     };
 } // end namespace
 
-    extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo
+extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo
 llvmGetPassPluginInfo()
-    {
-        return {
-                LLVM_PLUGIN_API_VERSION, "MyPollyScopPass", "0.1",
-                [](llvm::PassBuilder &PB)
-                {
+{
+    return {
+            LLVM_PLUGIN_API_VERSION, "MyPollyScopPass", "0.1",
+            [](llvm::PassBuilder &PB)
+            {
 
-                    // THE MAGIC LINE: Manually register Polly's analyses with the PassBuilder
-                    polly::registerPollyPasses(PB);
+                // THE MAGIC LINE: Manually register Polly's analyses with the PassBuilder
+                polly::registerPollyPasses(PB);
 
-                    // Keep your existing explicit parsing setup
-                    PB.registerPipelineParsingCallback(
-                            [](llvm::StringRef Name,
-                               llvm::FunctionPassManager &FPM,
-                               llvm::ArrayRef<llvm::PassBuilder::PipelineElement>)
+                // Keep your existing explicit parsing setup
+                PB.registerPipelineParsingCallback(
+                        [](llvm::StringRef Name,
+                           llvm::FunctionPassManager &FPM,
+                           llvm::ArrayRef <llvm::PassBuilder::PipelineElement>)
+                        {
+                            if (Name == "my-polly-scop-pass")
                             {
-                                if (Name == "my-polly-scop-pass")
-                                {
-                                    FPM.addPass(latensor::MyPollyScopPass());
-                                    return true;
-                                }
-                                return false;
-                            });
-                }
-        };
-    }
+                                FPM.addPass(latensor::MyPollyScopPass());
+                                return true;
+                            }
+                            return false;
+                        });
+            }
+    };
+}
 
 /*
+possible improvements:
+- make sure the RAW dependencies detected have a positive distance
+- should we fallback to polly for reduction detection?
+
 Algorithm:
 root = build_isl_ast()
 process_ast_node(root)
