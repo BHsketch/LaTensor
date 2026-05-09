@@ -18,3 +18,4 @@ claude_gen/
 *.out
 src/core/build/
 src/core/CMakeLists.txt
+.claude
