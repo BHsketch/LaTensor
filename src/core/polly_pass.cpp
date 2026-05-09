@@ -1376,7 +1376,7 @@ namespace latensor
     };
 } // end namespace
 
-	extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo
+    extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo
 llvmGetPassPluginInfo()
     {
         return {
@@ -1415,7 +1415,7 @@ void process_ast_node(){
 - get schedule for node
 - fill LoopInfo
 for each child of node {
-process_ast_node(child)  
+process_ast_node(child)
 }
 }
 
