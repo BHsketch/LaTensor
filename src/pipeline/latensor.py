@@ -253,7 +253,7 @@ def emit_llvm_ir(clang, kernel_cpp, out_ll):
     run([
         str(clang),
         "-O0", "-Xclang", "-disable-O0-optnone", "-ffast-math",
-        "-S", "-emit-llvm",
+        "-g", "-S", "-emit-llvm",
         str(kernel_cpp), "-o", str(out_ll),
     ])
 
