@@ -26,6 +26,8 @@
 
 using namespace llvm;
 
+#define FAIL(n) throw std::runtime_error(n)
+
 namespace latensor {
 enum IterVarType { spatial, reduction, scan };
 
@@ -204,11 +206,6 @@ std::string buildMathematicalAccess(polly::MemoryAccess *MA) {
                         std::to_string(coef) + " * vi" + std::to_string(i);
                 }
                 is_first = false;
-
-                // NOTE: If you are populating your IterVarInfo struct,
-                // you would do
-                // `my_iter_info.linear_combination.push_back({vi_ptr, coef});`
-                // here!
             }
         }
 
@@ -239,7 +236,31 @@ std::string buildMathematicalAccess(polly::MemoryAccess *MA) {
 
 // Helper to recursively reconstruct the math expression
 std::string buildComputeMath(llvm::Value *Val, polly::ScopStmt *Stmt) {
-    // 1. Is it a Load? (Base case)
+    // 1. Handle Constant Integers (e.g., i64 1, i32 5)
+    if (auto *ConstInt = llvm::dyn_cast<llvm::ConstantInt>(Val)) {
+        // Get the actual number and convert to string
+        return std::to_string(ConstInt->getSExtValue());
+    }
+
+    // 2. Handle Constant Floats (e.g., double 3.14)
+    if (auto *ConstFP = llvm::dyn_cast<llvm::ConstantFP>(Val)) {
+        // Extract the float/double as a string
+        return std::to_string(ConstFP->getValueAPF().convertToDouble());
+    }
+
+    // 3. Handle Function Arguments (e.g., %0, %1)
+    if (auto *Arg = llvm::dyn_cast<llvm::Argument>(Val)) {
+        // If your C function was `void matmul(float* A, int N)`,
+        // Arg->getName() will return "N" (if the C code had debug info).
+        // If it's unnamed, it might be empty, so we fallback to a custom name.
+        std::string arg_name = Arg->getName().str();
+        if (arg_name.empty()) {
+            arg_name = "arg_" + std::to_string(Arg->getArgNo());
+        }
+        return arg_name;
+    }
+
+    // 1. Is it a Load?
     if (auto *Load = llvm::dyn_cast<llvm::LoadInst>(Val)) {
         // Find which Polly MemoryAccess corresponds to this load
         for (polly::MemoryAccess *MA : *Stmt) {
@@ -247,8 +268,23 @@ std::string buildComputeMath(llvm::Value *Val, polly::ScopStmt *Stmt) {
                 return buildMathematicalAccess(MA); // Replace with actual index
         }
 
-        Load->print(errs());
-        return "UnknownLoad";
+        llvm::Value *Ptr = Load->getPointerOperand();
+        std::string ptr_name = Ptr->getName().str();
+
+        if (ptr_name.empty()) {
+            // If it's an unnamed virtual register like %9, LLVM doesn't store a string name.
+            // We can just format it to look like a TVM variable.
+            ptr_name = "scalar_reg";
+        }
+
+        return ptr_name;
+    }
+
+    if (auto *UO = llvm::dyn_cast<llvm::UnaryOperator>(Val)) {
+        if (UO->getOpcode() == llvm::Instruction::FNeg) {
+            std::string inner = buildComputeMath(UO->getOperand(0), Stmt);
+            return "-(" + inner + ")";
+        }
     }
 
     // 2. Is it a mathematical operation? (Recursive case)
@@ -267,10 +303,24 @@ std::string buildComputeMath(llvm::Value *Val, polly::ScopStmt *Stmt) {
         case llvm::Instruction::FDiv:
             op = " / ";
             break;
-        default:
-            throw std::runtime_error("Unsupported binop " + op);
+        case llvm::Instruction::Add:
+            op = " + ";
             break;
-            // todo add other operations as needed...
+        case llvm::Instruction::Sub:
+            op = " - ";
+            break;
+        case llvm::Instruction::Mul:
+            op = " * ";
+            break;
+        case llvm::Instruction::SDiv:
+            op = " // ";
+            break;
+        case llvm::Instruction::SRem:
+            op = " % ";
+            break;
+        default:
+            FAIL("Unsupported binop " + op);
+            break;
         }
 
         std::string left = buildComputeMath(BinOp->getOperand(0), Stmt);
@@ -314,6 +364,12 @@ std::string buildComputeMath(llvm::Value *Val, polly::ScopStmt *Stmt) {
             return "T.exp(" + op + ")";
         }
 
+        if (ID == llvm::Intrinsic::sqrt) {
+            std::string op =
+                    buildComputeMath(IntrinsicCall->getArgOperand(0), Stmt);
+            return "T.sqrt(" + op + ")";
+        }
+
         if (ID == llvm::Intrinsic::exp2) {
             errs() << "exp2\n";
             std::string op =
@@ -322,10 +378,35 @@ std::string buildComputeMath(llvm::Value *Val, polly::ScopStmt *Stmt) {
         }
     }
 
-    Val->print(errs());
-    errs() << "\n";
+    if (auto *Cast = llvm::dyn_cast<llvm::CastInst>(Val)) {
+        // Recursively evaluate the value being casted (e.g., %30)
+        std::string inner_val = buildComputeMath(Cast->getOperand(0), Stmt);
 
-    return "UnsupportedValue";
+        // Handle Signed Integer to Float
+        if (Cast->getOpcode() == llvm::Instruction::SIToFP) {
+            llvm::Type *DestTy = Cast->getDestTy();
+
+            if (DestTy->isDoubleTy()) {
+                return "T.cast(\"float64\", " + inner_val + ")";
+            } else if (DestTy->isFloatTy()) {
+                return "T.cast(\"float32\", " + inner_val + ")";
+            }
+        }
+
+        // (Optional) Handle Float to Float extension/truncation if needed
+        if (Cast->getOpcode() == llvm::Instruction::FPExt) {
+            return "T.cast(\"float64\", " + inner_val + ")"; // float to double
+        }
+        if (Cast->getOpcode() == llvm::Instruction::FPTrunc) {
+            return "T.cast(\"float32\", " + inner_val + ")"; // double to float
+        }
+    }
+
+    errs() << ">>>> Missing translation: ";
+    Val->print(errs());
+    errs() << " <<<<\n";
+
+    FAIL("Unsupported Value");
 }
 
 struct BlockInfo : TreeNode {
@@ -1299,11 +1380,11 @@ struct MyPollyScopPass : public PassInfoMixin<MyPollyScopPass> {
                 .getManager();
 
         if (SI.empty()) {
-            errs() << "No SCoPs in function: " << F.getName() << "\n";
+            errs() << "\n====================\nNo SCoPs in function: " << F.getName() << "\n";
             return PreservedAnalyses::all();
         }
 
-        //            errs() << "Function: " << F.getName() << "\n";
+        errs() << "\n====================\nFunction: " << F.getName() << "\n";
 
         polly::ScopStandardAnalysisResults AR = {
             FAM.getResult<llvm::DominatorTreeAnalysis>(F),
@@ -1374,10 +1455,10 @@ struct MyPollyScopPass : public PassInfoMixin<MyPollyScopPass> {
                 //                    Loop Bounds (Domain): " << DomainStr <<
                 //                    "\n"; free(DomainStr);
                 //
-                //                    for (Instruction *I:
-                //                    Stmt.getInstructions())
-                //                        errs() << "      Inst: " << *I <<
-                //                        "\n";
+//                                    for (Instruction *I:
+//                                    Stmt.getInstructions())
+//                                        errs() << "      Inst: " << *I <<
+//                                        "\n";
                 //
                 //                    for (polly::MemoryAccess *MA: Stmt)
                 //                    {
@@ -1388,46 +1469,40 @@ struct MyPollyScopPass : public PassInfoMixin<MyPollyScopPass> {
 
                 try {
                     std::vector<ClassifyResult> cr = classifyStmt(Stmt, Deps);
-                    for (const auto &r : cr) {
-                        const char *kind = (r.stmt_type == scan) ? "scan"
-                                           : (r.stmt_type == reduction)
-                                               ? "reduction"
-                                               : "spatial";
-                        errs()
-                            << "      => write @ " << r.write << ": " << kind;
-                        if (!r.red_axes.empty()) {
-                            errs() << ", carrying dims [";
-                            for (size_t i = 0; i < r.red_axes.size(); ++i)
-                                errs() << (i ? ", " : "") << r.red_axes[i];
-                            errs() << "]";
-                        }
-                        errs() << "\n";
-                    }
+//                    for (const auto &r : cr) {
+//                        const char *kind = (r.stmt_type == scan) ? "scan"
+//                                           : (r.stmt_type == reduction)
+//                                               ? "reduction"
+//                                               : "spatial";
+//                        errs()
+//                            << "      => write @ " << r.write << ": " << kind;
+//                        if (!r.red_axes.empty()) {
+//                            errs() << ", carrying dims [";
+//                            for (size_t i = 0; i < r.red_axes.size(); ++i)
+//                                errs() << (i ? ", " : "") << r.red_axes[i];
+//                            errs() << "]";
+//                        }
+//                        errs() << "\n";
+//                    }
                     if (!cr.empty())
                         stmt_classification[&Stmt] = std::move(cr);
                 } catch (const std::runtime_error &e) {
-                    errs() << "      ERROR: " << e.what() << "\n";
+                    errs() << "Error classifying statement: " << e.what() << "\n";
+                    continue;
                 }
             }
 
             // 2. Build the entire tree of LoopInfos and BlockInfos!
-            // walkAST throws on unsupported AST shapes (non-simple loop
-            // bounds, non-identity Polly schedules). Catch and downgrade
-            // to "no frame for this function" rather than aborting the
-            // whole pass run.
-            std::vector<std::shared_ptr<TreeNode>> LoopTree;
-            bool walk_ok = false;
             try {
-                LoopTree = walkAST(RootNode, {}, stmt_classification);
-                walk_ok = true;
-            } catch (const std::runtime_error &e) {
-                errs() << "  [LATENSOR] walkAST failed: " << e.what() << "\n";
-            }
+                std::vector<std::shared_ptr<TreeNode>> LoopTree =
+                        walkAST(RootNode, {}, stmt_classification);
 
-            errs() << "TVM CODE IS:\n";
-            if (walk_ok) {
-                for (auto lt : LoopTree)
+                errs() << "TVM CODE IS:\n";
+                for (auto lt : LoopTree) {
                     errs() << lt->to_string();
+                }
+            } catch (const std::runtime_error &e) {
+                errs() << "SCoP could not be translated! " << e.what() << "\n";
             }
 
             // ── LATENSOR frame emission ───────────────────────────────────
@@ -1503,8 +1578,7 @@ struct MyPollyScopPass : public PassInfoMixin<MyPollyScopPass> {
             auto current_loop = std::make_shared<LoopInfo>();
             bool found = get_loop_bound(Node, current_loop, loop_backtrace);
             if (!found)
-                throw std::runtime_error("LaTensor: Failed to convert -- loop "
-                                         "bounds are not simple");
+                FAIL("Failed to convert -- loop bounds are not simple");
 
             //                errs() << "loop begin\n";
             // Recurse into the body of the loop
@@ -1573,7 +1647,7 @@ struct MyPollyScopPass : public PassInfoMixin<MyPollyScopPass> {
             auto leaf = std::make_shared<BlockInfo>(Stmt);
             //                errs() << "a block!\n";
             //                errs() << *Stmt->printInstructions() << "\n";
-            Stmt->printInstructions(errs());
+//            Stmt->printInstructions(errs());
 
             // One IterVarInfo per surrounding loop, defaulting to spatial.
             int vi_count = 0;
@@ -1591,8 +1665,8 @@ struct MyPollyScopPass : public PassInfoMixin<MyPollyScopPass> {
                 // indexing to be valid. Non-identity Polly schedules
                 // (tiling, fusion) would break this.
                 if (loop_backtrace.size() != Stmt->getNumIterators())
-                    throw std::runtime_error(
-                        "LaTensor: AST loop depth does not match Stmt "
+                    FAIL(
+                        "AST loop depth does not match Stmt "
                         "iteration domain dim count -- non-identity "
                         "Polly schedule is not supported");
 
@@ -1604,8 +1678,8 @@ struct MyPollyScopPass : public PassInfoMixin<MyPollyScopPass> {
                         if (slot == spatial)
                             slot = cr.stmt_type;
                         else if (slot != cr.stmt_type)
-                            throw std::runtime_error(
-                                "LaTensor: axis classified as both "
+                            FAIL(
+                                "axis classified as both "
                                 "reduction and scan by different writes "
                                 "in the same Stmt -- unsupported");
                     }
@@ -1667,20 +1741,25 @@ struct MyPollyScopPass : public PassInfoMixin<MyPollyScopPass> {
                 if (li->name == name)
                     return {li->lower_bound, li->upper_bound};
             }
+
+            errs() << "Bound evaluation failed: " << isl_ast_expr_to_str(expr) << "\n";
+            FAIL("Bound evaluation failed!");
             return {0, 0}; // Fallback if not found
         }
         // Recursive Case: Math Operation
         else if (type == isl_ast_expr_op) {
             auto op_type = isl_ast_expr_get_op_type(expr);
 
-            // Extract arguments
             isl_ast_expr *arg0 = isl_ast_expr_get_op_arg(expr, 0);
-            isl_ast_expr *arg1 = isl_ast_expr_get_op_arg(expr, 1);
-
             Interval i0 = evaluate_bound(arg0, backtrace);
+            isl_ast_expr_free(arg0);
+
+            if (op_type == isl_ast_expr_op_minus)
+                return {i0.max, i0.min};
+
+            isl_ast_expr *arg1 = isl_ast_expr_get_op_arg(expr, 1);
             Interval i1 = evaluate_bound(arg1, backtrace);
 
-            isl_ast_expr_free(arg0);
             isl_ast_expr_free(arg1);
 
             if (op_type == isl_ast_op_add) {
@@ -1706,6 +1785,8 @@ struct MyPollyScopPass : public PassInfoMixin<MyPollyScopPass> {
             }
         }
 
+        errs() << "Bound evaluation failed: " << isl_ast_expr_to_str(expr) << "\n";
+        FAIL("Bound evaluation failed!");
         return {0, 0};
     }
 
@@ -1747,7 +1828,7 @@ struct MyPollyScopPass : public PassInfoMixin<MyPollyScopPass> {
 
         // Save the expression string (e.g., "c0" or "0")
         lb_str = get_ast_expr_str(init_expr.get());
-        errs() << "lower: " << lb_str << "\n";
+//        errs() << "lower: " << lb_str << "\n";
 
         // 3. EXTRACT UPPER BOUND
         isl::ast_expr cond_expr =
@@ -1774,7 +1855,7 @@ struct MyPollyScopPass : public PassInfoMixin<MyPollyScopPass> {
 
             // Save the expression string (e.g., "2 * c0" or "10")
             ub_str = get_ast_expr_str(ub_expr.get());
-            errs() << "upper: " << ub_str << "\n";
+//            errs() << "upper: " << ub_str << "\n";
         } else {
             return false;
         }
