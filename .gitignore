@@ -19,3 +19,4 @@ claude_gen/
 src/core/build/
 src/core/CMakeLists.txt
 .claude
+src/pipeline/__pycache__/

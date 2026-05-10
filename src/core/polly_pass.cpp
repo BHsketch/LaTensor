@@ -1,7 +1,11 @@
 #include "polly/RegisterPasses.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/BinaryFormat/Dwarf.h" // For DW_TAG_* enum values (LATENSOR frame)
+#include "llvm/IR/DebugInfoMetadata.h" // For DISubprogram/DILocalVariable/DIType
+#include "llvm/IR/DebugProgramInstruction.h" // For DbgRecord / DbgVariableRecord
 #include "llvm/IR/Function.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"  // For DbgVariableIntrinsic (legacy DI form)
 #include "llvm/IR/PassManager.h" // Added for PreservedAnalyses & PassInfoMixin
 #include "llvm/Passes/PassBuilder.h"
 #include "llvm/Passes/PassPlugin.h"
@@ -10,11 +14,14 @@
 // Polly headers
 #include "polly/ScopInfo.h"
 #include <isl/ast.h>
+#include <isl/ilp.h> // For isl_set_dim_max_val (LATENSOR frame buffer sizing)
 
 #include "polly/CodeGen/IslAst.h" // For IslAstInfo, IslAstAnalysis
 #include "polly/DependenceInfo.h" // For DependenceInfo, DependenceAnalysis, TYPE_RAW
 #include "llvm/Analysis/RegionInfo.h"
+#include <optional>
 #include <regex>
+#include <sstream>
 #include <utility>
 
 using namespace llvm;
@@ -1049,6 +1056,318 @@ classifyStmt(polly::ScopStmt &Stmt, const polly::Dependences &Deps) {
     return results;
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// LATENSOR_BEGIN/END frame emission.
+//
+// Self-contained helpers that wrap walkAST's body in the orchestrator-expected
+// envelope (see src/pipeline/polly_pass_contract.md). Designed to live next
+// to existing helpers without touching BlockInfo / buildComputeMath /
+// buildMathematicalAccess / walkAST — those keep emitting MemRef-named bodies
+// and we post-rewrite MemRef# → source-level arg names here.
+// ───────────────────────────────────────────────────────────────────────────
+namespace frame {
+
+struct ArgInfo {
+    std::string name;
+    std::string cppType; // e.g. "const float*", "int"
+};
+
+struct BufferInfo {
+    std::string memref_name; // "MemRef0"
+    std::string arg_name;    // "A"
+    std::string cpp_type;    // "const float*"
+    std::string dtype;       // "float32"
+    long size;               // # of elements in the 1D buffer
+};
+
+// Recurse through DIDerivedType (pointer / const / typedef / restrict /
+// volatile / atomic) until we hit a DIBasicType, formatting the cpp source
+// type along the way. Returns a string containing "?" if the type can't be
+// reduced — caller treats that as an unsupported-type failure.
+static std::string formatDIType(llvm::DIType *T) {
+    if (!T)
+        return "void";
+    if (auto *D = llvm::dyn_cast<llvm::DIDerivedType>(T)) {
+        llvm::DIType *base = D->getBaseType();
+        switch (D->getTag()) {
+        case llvm::dwarf::DW_TAG_pointer_type:
+            return formatDIType(base) + "*";
+        case llvm::dwarf::DW_TAG_const_type:
+            return "const " + formatDIType(base);
+        // __restrict, typedef, volatile, atomic: drop the qualifier. The
+        // contract's recognized types list doesn't include them, and clang
+        // emits them as extra DIDerivedType wrappers in DWARF.
+        case llvm::dwarf::DW_TAG_restrict_type:
+        case llvm::dwarf::DW_TAG_typedef:
+        case llvm::dwarf::DW_TAG_volatile_type:
+        case llvm::dwarf::DW_TAG_atomic_type:
+            return formatDIType(base);
+        default:
+            return "?";
+        }
+    }
+    if (auto *B = llvm::dyn_cast<llvm::DIBasicType>(T))
+        return B->getName().str();
+    return "?";
+}
+
+// Pull each cpp argument's source-level name and type from the function's
+// DISubprogram. Returns nullopt if DI is missing, an arg's DI can't be
+// located, or any type contains "?" (an unrecognized DIDerivedType tag).
+static std::optional<std::vector<ArgInfo>>
+extractFunctionArgs(llvm::Function &F) {
+    llvm::DISubprogram *SP = F.getSubprogram();
+    if (!SP)
+        return std::nullopt;
+
+    // DISubprogram::getRetainedNodes() *should* hold the parameter
+    // DILocalVariables, but after mem2reg + simplifycfg + friends it tends
+    // to be empty — the arg DI gets attached to dbg.value records on the
+    // promoted SSA values instead. Try retainedNodes first, then fall back
+    // to walking the function's debug records and intrinsics.
+    std::map<unsigned, llvm::DILocalVariable *> argDIs;
+    for (auto *N : SP->getRetainedNodes()) {
+        auto *LV = llvm::dyn_cast_or_null<llvm::DILocalVariable>(N);
+        if (LV && LV->getArg() > 0)
+            argDIs[LV->getArg()] = LV;
+    }
+    if (argDIs.size() < F.arg_size()) {
+        for (llvm::BasicBlock &BB : F) {
+            for (llvm::Instruction &I : BB) {
+                // LLVM 21 default: dbg info lives in DbgRecords attached
+                // to instructions.
+                for (llvm::DbgRecord &DR : I.getDbgRecordRange()) {
+                    auto *DVR = llvm::dyn_cast<llvm::DbgVariableRecord>(&DR);
+                    if (!DVR)
+                        continue;
+                    auto *LV = DVR->getVariable();
+                    if (LV && LV->getArg() > 0)
+                        argDIs.emplace(LV->getArg(), LV);
+                }
+                // Legacy form (dbg.declare / dbg.value intrinsics) just
+                // in case the IR is in intrinsics mode.
+                if (auto *DVI =
+                        llvm::dyn_cast<llvm::DbgVariableIntrinsic>(&I)) {
+                    if (auto *LV = DVI->getVariable())
+                        if (LV->getArg() > 0)
+                            argDIs.emplace(LV->getArg(), LV);
+                }
+            }
+        }
+    }
+
+    std::vector<ArgInfo> out;
+    for (llvm::Argument &A : F.args()) {
+        // DI arg index is 1-based; LLVM Argument index is 0-based.
+        auto it = argDIs.find(A.getArgNo() + 1);
+        if (it == argDIs.end())
+            return std::nullopt;
+        ArgInfo ai;
+        ai.name = it->second->getName().str();
+        ai.cppType = formatDIType(it->second->getType());
+        if (ai.cppType.find('?') != std::string::npos)
+            return std::nullopt;
+        out.push_back(std::move(ai));
+    }
+    return out;
+}
+
+static bool isPtrType(const std::string &cppType) {
+    return !cppType.empty() && cppType.back() == '*';
+}
+
+// Map cpp pointer type (e.g. "const float*") to TVM dtype string. nullopt
+// for unsupported element types (see contract §3).
+static std::optional<std::string> ptrTypeToDtype(const std::string &cppType) {
+    if (cppType == "float*" || cppType == "const float*")
+        return std::string("float32");
+    if (cppType == "double*" || cppType == "const double*")
+        return std::string("float64");
+    if (cppType == "int*" || cppType == "const int*")
+        return std::string("int32");
+    return std::nullopt;
+}
+
+// Compute a constant 1D buffer size = max(access-relation range, dim 0) + 1
+// across all MAs touching this SAI. Returns -1 if the SCoP has no array
+// accesses for this SAI, if the access space isn't 1D, or if the max isn't a
+// known constant integer (e.g. depends on a parametric N).
+static long computeBufferSize(polly::ScopArrayInfo *SAI, polly::Scop &S) {
+    isl_set *acc_union = nullptr;
+    for (polly::ScopStmt &Stmt : S) {
+        for (polly::MemoryAccess *MA : Stmt) {
+            if (MA->getScopArrayInfo() != SAI)
+                continue;
+            if (!MA->isArrayKind())
+                continue;
+            // The access relation maps the stmt's iteration variables to
+            // array index space; on its own the iteration variables are
+            // unbounded, which makes the range unbounded too. Intersect
+            // with the stmt's domain so the resulting range reflects only
+            // index values that actually occur during execution.
+            isl::map AR = MA->getAccessRelation();
+            isl::set Domain = Stmt.getDomain();
+            isl_map *AR_bounded =
+                isl_map_intersect_domain(AR.release(), Domain.release());
+            isl_set *Range = isl_map_range(AR_bounded);
+            acc_union = acc_union ? isl_set_union(acc_union, Range) : Range;
+        }
+    }
+    if (!acc_union)
+        return -1;
+    acc_union = isl_set_coalesce(acc_union);
+    unsigned ndim = isl_set_dim(acc_union, isl_dim_set);
+    if (ndim != 1) {
+        // Multi-dim Polly modeling isn't supported by the existing body
+        // emitter (buildMathematicalAccess only reads dim 0).
+        isl_set_free(acc_union);
+        return -1;
+    }
+
+    isl_val *v = isl_set_dim_max_val(acc_union, 0); // consumes acc_union
+    long maxIdx = -1;
+    if (v && isl_val_is_int(v) == isl_bool_true &&
+        isl_val_is_nan(v) != isl_bool_true) {
+        maxIdx = isl_val_get_num_si(v);
+    }
+    isl_val_free(v);
+    if (maxIdx < 0)
+        return -1;
+    return maxIdx + 1;
+}
+
+// For each Polly array in the SCoP, find which function argument backs it
+// (via base-pointer identity, post-mem2reg). Returns nullopt if any SAI's
+// base ptr isn't a function arg, if a backing arg points to an unsupported
+// element type, or if a size can't be computed.
+static std::optional<std::map<std::string, BufferInfo>>
+mapBuffersToArgs(polly::Scop &S, llvm::Function &F,
+                 const std::vector<ArgInfo> &args) {
+    std::map<std::string, BufferInfo> out;
+    for (polly::ScopArrayInfo *SAI : S.arrays()) {
+        if (!SAI->isArrayKind())
+            continue; // skip scalar Value/PHI/ExitPHI MemRefs
+        llvm::Value *base = SAI->getBasePtr();
+        llvm::Argument *backing = nullptr;
+        for (llvm::Argument &A : F.args()) {
+            if (&A == base) {
+                backing = &A;
+                break;
+            }
+        }
+        if (!backing) {
+            errs() << "  [LATENSOR] MemRef " << SAI->getName()
+                   << " base ptr is not a function arg (stack-local / global "
+                      "/ escaped alloca) — unsupported\n";
+            return std::nullopt;
+        }
+        const ArgInfo &ai = args[backing->getArgNo()];
+        auto dtype = ptrTypeToDtype(ai.cppType);
+        if (!dtype) {
+            errs() << "  [LATENSOR] arg " << ai.name
+                   << " has unsupported cpp type " << ai.cppType << "\n";
+            return std::nullopt;
+        }
+        long size = computeBufferSize(SAI, S);
+        if (size < 0) {
+            errs() << "  [LATENSOR] couldn't compute constant size for MemRef "
+                   << SAI->getName() << "\n";
+            return std::nullopt;
+        }
+        BufferInfo bi{SAI->getName(), ai.name, ai.cppType, *dtype, size};
+        out[bi.memref_name] = bi;
+    }
+    return out;
+}
+
+// Replace every `\bMemRef<N>\b` in body with the corresponding source-level
+// arg name. Unmapped MemRefs are left in place (caller should have ensured
+// no such MemRef exists in the body via mapBuffersToArgs).
+static std::string
+renameMemRefs(const std::string &body,
+              const std::map<std::string, BufferInfo> &memref_to_buf) {
+    static const std::regex re("\\bMemRef([0-9]+)\\b");
+    std::string out;
+    out.reserve(body.size());
+    auto search_start = body.cbegin();
+    std::smatch m;
+    while (std::regex_search(search_start, body.cend(), m, re)) {
+        out.append(search_start, m[0].first);
+        std::string key = "MemRef" + m[1].str();
+        auto it = memref_to_buf.find(key);
+        out += (it != memref_to_buf.end()) ? it->second.arg_name : m[0].str();
+        search_start = m[0].second;
+    }
+    out.append(search_start, body.cend());
+    return out;
+}
+
+// Translate body primitives emitted by BlockInfo::to_string into the
+// vocabulary expected by this TVM fork's `tvm.script.tirx` dialect. Today
+// the only divergence is `T.block` → `T.sblock` (tirx has no `T.block`).
+// Any future tirx-specific renames go here too.
+static std::string tirxifyBody(const std::string &body) {
+    static const std::regex block_re("\\bT\\.block\\b");
+    return std::regex_replace(body, block_re, "T.sblock");
+}
+
+// Wrap the walk-AST body in a contract-shaped LATENSOR frame. Caller is
+// responsible for having already validated that this function should emit a
+// frame (single SCoP, extern-C, mapped buffers, etc.).
+static std::string
+composeFrame(const std::string &fnName, const std::vector<ArgInfo> &args,
+             const std::vector<BufferInfo> &orderedBufs,
+             const std::map<std::string, BufferInfo> &memref_to_buf,
+             const std::string &raw_body) {
+    std::ostringstream f;
+    f << "===LATENSOR_BEGIN\n";
+    f << "function: " << fnName << "\n";
+
+    f << "args: ";
+    for (size_t i = 0; i < args.size(); ++i) {
+        if (i)
+            f << ",";
+        f << args[i].name << ":" << args[i].cppType;
+    }
+    f << "\n";
+
+    f << "tvm_buffers: ";
+    for (size_t i = 0; i < orderedBufs.size(); ++i) {
+        if (i)
+            f << ",";
+        f << orderedBufs[i].arg_name;
+    }
+    f << "\n";
+
+    f << "===\n";
+    f << "@T.prim_func\n";
+    f << "def main(";
+    for (size_t i = 0; i < orderedBufs.size(); ++i) {
+        if (i)
+            f << ", ";
+        f << orderedBufs[i].arg_name << ": T.Buffer((" << orderedBufs[i].size
+          << ",), \"" << orderedBufs[i].dtype << "\")";
+    }
+    f << "):\n";
+    f << "    T.func_attr({\"tirx.noalias\": True})\n";
+
+    // Rename MemRef# → arg names, swap any tir-vs-tirx primitives, then
+    // indent the whole body by 4 spaces so it sits inside `def main`.
+    // indent_lines() is the existing helper in this namespace; reuse to
+    // keep formatting consistent with BlockInfo.
+    std::string transformed = tirxifyBody(renameMemRefs(raw_body, memref_to_buf));
+    if (!transformed.empty()) {
+        f << indent_lines(transformed);
+        if (transformed.back() != '\n')
+            f << "\n";
+    }
+
+    f << "===LATENSOR_END\n";
+    return f.str();
+}
+
+} // namespace frame
+
 // 1. Inherit from PassInfoMixin instead of FunctionPass
 struct MyPollyScopPass : public PassInfoMixin<MyPollyScopPass> {
     // 2. Use the NPM run signature
@@ -1074,6 +1393,35 @@ struct MyPollyScopPass : public PassInfoMixin<MyPollyScopPass> {
             FAM.getResult<llvm::LoopAnalysis>(F),
             FAM.getResult<llvm::RegionInfoAnalysis>(F),
             FAM.getResult<llvm::TargetIRAnalysis>(F)};
+
+        // LATENSOR frame gate: emit at most one frame per function, and
+        // only when the function body is exactly one SCoP (contract §5).
+        // Functions with multiple SCoPs can't be replaced wholesale by a
+        // single TVM .so call, so we leave them as-is.
+        size_t scop_count = std::distance(SI.begin(), SI.end());
+        bool emit_frame = (scop_count == 1);
+        if (!emit_frame)
+            errs() << "  [LATENSOR] " << F.getName() << ": " << scop_count
+                   << " SCoPs in function — skipping frame emission\n";
+
+        // LATENSOR also requires the function to be extern "C" so the
+        // emitted `function: <name>` matches both the LLVM linkage name and
+        // the source-level name (contract §3). Detect that by comparing
+        // F.getName() to the DI subprogram name — they only match for
+        // extern "C" / C-linkage symbols.
+        if (emit_frame) {
+            llvm::DISubprogram *SP = F.getSubprogram();
+            if (!SP) {
+                errs() << "  [LATENSOR] " << F.getName()
+                       << ": no debug info (compile with -g) — skipping frame\n";
+                emit_frame = false;
+            } else if (F.getName() != SP->getName()) {
+                errs() << "  [LATENSOR] " << F.getName()
+                       << " is mangled (DI name: " << SP->getName()
+                       << ") — not extern \"C\", skipping frame\n";
+                emit_frame = false;
+            }
+        }
 
         for (auto &Entry : SI) {
             polly::Scop *S = Entry.second.get();
@@ -1157,9 +1505,56 @@ struct MyPollyScopPass : public PassInfoMixin<MyPollyScopPass> {
                 errs() << "SCoP could not be translated! " << e.what() << "\n";
             }
 
-            // Now LoopTree contains your fully structured, nested hierarchy.
+            // ── LATENSOR frame emission ───────────────────────────────────
+            // Compose the entire frame in memory and write it to outs() in
+            // one shot. If anything between here and the final write fails,
+            // nothing hits stdout for this function (contract §2 — emit a
+            // full frame or none at all per function).
+            if (!emit_frame || !walk_ok)
+                continue;
 
-            //                S->print(llvm::errs(), false);
+            auto argsOpt = frame::extractFunctionArgs(F);
+            if (!argsOpt) {
+                errs() << "  [LATENSOR] " << F.getName()
+                       << ": couldn't recover args/types from DWARF "
+                          "(compile with -g; unsupported type qualifier?) "
+                          "— skipping frame\n";
+                continue;
+            }
+
+            auto bufMapOpt = frame::mapBuffersToArgs(*S, F, *argsOpt);
+            if (!bufMapOpt) {
+                // mapBuffersToArgs already logged the specific cause.
+                continue;
+            }
+
+            // Order buffers by cpp arg declaration so `tvm_buffers:` and
+            // `def main(...)` parameters appear in the same order (contract
+            // §3 — TVM-call order = prim_func order). Drop pointer args
+            // that aren't touched by the SCoP.
+            std::vector<frame::BufferInfo> orderedBufs;
+            for (const auto &ai : *argsOpt) {
+                if (!frame::isPtrType(ai.cppType))
+                    continue;
+                for (const auto &kv : *bufMapOpt) {
+                    if (kv.second.arg_name == ai.name) {
+                        orderedBufs.push_back(kv.second);
+                        break;
+                    }
+                }
+            }
+
+            std::string raw_body;
+            for (auto lt : LoopTree)
+                raw_body += lt->to_string();
+
+            std::string frame_text = frame::composeFrame(
+                F.getName().str(), *argsOpt, orderedBufs, *bufMapOpt,
+                raw_body);
+            outs() << frame_text;
+
+            // emit_frame is one-shot per function — even though we're inside
+            // a per-SCoP loop, scop_count == 1 guarantees a single pass.
         }
 
         // 4. Return the analyses preserved (all of them, since we only read)
