@@ -35,6 +35,7 @@ find "$TEST_DIR" -type f -name "*.c" | while read -r filepath; do
     # adjust the -I flag if your polybench utilities are elsewhere.
     clang -O0 -Xclang -disable-O0-optnone -ffast-math \
           -I"${TEST_DIR}/utilities" \
+          -DPOLYBENCH_USE_SCALAR_LB \
           -S -emit-llvm "$filepath" -o "$ll_file"
 
     if [ $? -ne 0 ]; then
