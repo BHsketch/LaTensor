@@ -11,7 +11,7 @@
 extern "C" void matmul_naive(const float* __restrict A,
                              const float* __restrict B,
                              float* __restrict C, int N) {
-    N = 128;
+    N = 1024;
     for (int i = 0; i < N; i++) {
         for (int j = 0; j < N; j++) {
             for (int k = 0; k < N; k++) {
@@ -24,7 +24,7 @@ extern "C" void matmul_naive(const float* __restrict A,
 extern "C" void gather(const float* __restrict A,
                        const int* __restrict idx,
                        float* __restrict B, int N) {
-    N = 128;
+    N = 1024;
     for (int i = 0; i < N; i++) {
         B[i] = A[idx[i]];
     }

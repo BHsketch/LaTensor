@@ -3,11 +3,12 @@
 #include <iostream>
 #include <random>
 
-extern "C" void matmul_naive(const float* A, const float* B, float* C, int N);
+extern "C" void simple_reduction(const float* A, float* B, float* T, int N);
 
 static float* alloc_matrix(int N) {
     float* m = nullptr;
-    if (posix_memalign(reinterpret_cast<void**>(&m), 64, N * N * sizeof(float))) {
+    if (posix_memalign(reinterpret_cast<void**>(&m), 64,
+                       N * sizeof(float))) {
         std::cerr << "Allocation failed\n";
         std::exit(1);
     }
@@ -16,28 +17,28 @@ static float* alloc_matrix(int N) {
 
 static void fill_random(float* m, int N, std::mt19937& rng) {
     std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-    for (int i = 0; i < N * N; i++) m[i] = dist(rng);
+    for (int i = 0; i < N; i++)
+        m[i] = dist(rng);
 }
 
 static void fill_zeros(float* m, int N) {
-    //std::uniform_real_distribution<float> dist(0.0f, 1.0f);
-    for (int i = 0; i < N * N; i++) m[i] = 0.0f;
+    for (int i = 0; i < N; i++)
+        m[i] = 0.0f;
 }
 
 int main() {
-    int N = 1024;
+    int N = 2000000;
     std::mt19937 rng(42);
     float* A = alloc_matrix(N);
-    float* B = alloc_matrix(N);
-    float* C = alloc_matrix(N);
+    float* B = alloc_matrix(1);
+    float* T = alloc_matrix(1);
     fill_random(A, N, rng);
-    fill_random(B, N, rng);
-    fill_zeros(C, N);
-
+    fill_zeros(B, 1);
+    fill_zeros(T, 1);
 
     auto start = std::chrono::high_resolution_clock::now();
-    for(int i=0; i<25; i++){
-        matmul_naive(A, B, C, N);
+    for(int i=0; i<1000; i++){
+        simple_reduction(A, B, T, N);
     }
     auto end = std::chrono::high_resolution_clock::now();
 
@@ -45,12 +46,14 @@ int main() {
         std::chrono::duration_cast<std::chrono::microseconds>(
             end - start);
 
-    std::uniform_int_distribution<int> dist(0, 1023);
-    std::cout << "Result (Random C element): " << C[dist(rng)] << "\n";
+    std::cout << "Result: " << B[0] << "\n";
     std::cout << "Execution time: "
               << duration.count()
               << " us\n";
 
-    free(A); free(B); free(C);
+    free(A);
+    free(B);
+    free(T);
+
     return 0;
 }

@@ -16,7 +16,9 @@ claude_gen/
 # Build artifacts and analysis output
 *.ll
 *.out
+*.tvm
 src/core/build/
 src/core/CMakeLists.txt
 .claude
 src/pipeline/__pycache__/
+src/pipeline/build_dir/

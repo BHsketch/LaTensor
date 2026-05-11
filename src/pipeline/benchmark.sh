@@ -27,6 +27,12 @@ CLANG="${LLVMBIN}/clang"
 BUILD_ROOT="${PIPELINEDIR}/build_dir"
 mkdir -p "${BUILD_ROOT}"
 
+# Per-benchmark timing results. One line per microbenchmark:
+#   <name> <cpp_time> <tvm_linked_time>
+# Times are the single numeric value on each binary's "Execution time" line.
+RESULTS_FILE="${BUILD_ROOT}/micro_results.txt"
+: > "${RESULTS_FILE}"
+
 # Tuning budget for both loops. PolyBench × 30 makes total tuning time
 # scale with this — drop it for smoke tests, raise it for real numbers.
 TUNING_TRIALS="${TUNING_TRIALS:-20}"
@@ -42,9 +48,12 @@ POLYBENCH_DEFINES="-DMEDIUM_DATASET -DPOLYBENCH_USE_SCALAR_LB -DPOLYBENCH_TIME"
 # Each entry is a subdirectory name under src/tests/ that contains a
 # kernel.cpp and a driver.cpp.
 MICRO_BENCHMARKS=(
-    "reduction_1"
-    "mixed"
     "matmul_naive"
+    "triangular_matmul"
+    "simple_reduction"
+    "scan_array"
+    #"mixed"
+    #"attention"
     # add more here
 )
 
@@ -81,13 +90,29 @@ for BENCHMARK in "${MICRO_BENCHMARKS[@]}"; do
         -o "${OUT_DIR}/tvm.out" \
         "${BENCH_DIR}/kernel.cpp" "${BENCH_DIR}/driver.cpp"
 
+    # Run binaries with stdout tee'd to the terminal AND captured to a log,
+    # so a hanging or slow binary is visible in real time (command-sub alone
+    # swallows output until the process exits — looks like silent failure).
     echo "########## [${BENCHMARK}] cpp baseline output ##########"
-    "${OUT_DIR}/cpp.out"
+    "${OUT_DIR}/cpp.out" 2>&1 | tee "${OUT_DIR}/cpp.run.log"
+    CPP_TIME="$(grep "Execution time" "${OUT_DIR}/cpp.run.log" \
+        | grep -oE '[0-9]+(\.[0-9]+)?' | tail -1)"
 
     echo "########## [${BENCHMARK}] TVM-linked output ##########"
-    LD_LIBRARY_PATH="${TVMLIB}" "${OUT_DIR}/tvm.out"
+    LD_LIBRARY_PATH="${TVMLIB}" "${OUT_DIR}/tvm.out" 2>&1 \
+        | tee "${OUT_DIR}/tvm.run.log"
+    TVM_TIME="$(grep "Execution time" "${OUT_DIR}/tvm.run.log" \
+        | grep -oE '[0-9]+(\.[0-9]+)?' | tail -1)"
+
+    echo "${BENCHMARK} ${CPP_TIME} ${TVM_TIME}" >> "${RESULTS_FILE}"
 done
 set +e
+
+echo
+echo "########## plotting microbenchmark results ##########"
+echo "  results file: ${RESULTS_FILE}"
+python3 "${PIPELINEDIR}/plot_benchmark.py" "${RESULTS_FILE}" \
+    "${BUILD_ROOT}/micro_results.png"
 
 # ─── Loop 2: PolyBench (every entry in utilities/benchmark_list) ────────────
 # Each iteration runs in a subshell with `set -e`, so a failure aborts that
