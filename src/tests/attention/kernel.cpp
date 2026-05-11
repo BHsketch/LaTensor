@@ -1,129 +1,111 @@
-#include <stdio.h>
-#include <stdlib.h>
-#include <math.h>
-#include <stdbool.h>
+// attention/kernel.cpp — flash-attention-style scoring split into per-phase
+// extern "C" sub-kernels.
+//
+// The original monolithic `general_attention` packed six sibling loop nests
+// of unequal depth (3, 4, 5) into one function body. Polly bundled them into
+// a single SCoP and produced a non-identity fused schedule, which the
+// latensor pipeline rejects with "AST loop depth does not match Stmt
+// iteration domain dim count". Splitting each phase into its own function
+// gives Polly one identity-scheduled SCoP per function, each with uniform
+// loop depth across all its ScopStmts.
+//
+// All shapes are baked compile-time constants (per polly_pass_contract §7).
+// Driver allocates and zero-inits every accumulator before each call.
 
-/* Function pointer definitions for dynamic score modification and masking */
-typedef float (*score_mod_fn)(float score, int b, int h, int q_idx, int kv_idx);
-typedef bool (*mask_cond_fn)(int b, int h, int q_idx, int kv_idx);
+#include <cmath>
 
-/* Helper macros for flattening multi-dimensional array indexing */
-#define IDX4D(b, h, i, j, H, I, J) ((b)*(H)*(I)*(J) + (h)*(I)*(J) + (i)*(J) + (j))
-#define IDX3D(b, h, i, H, I)       ((b)*(H)*(I) + (h)*(I) + (i))
+#define B 1
+#define H 32
+#define Q 4096
+#define K 4096
+#define D 128
 
-extern "C" void general_attention(
-        const float* q,
-        const float* k,
-        const float* v,
-        float* out,
-//        int batch_size,
-//        int num_heads,
-//        int q_seq_len,
-//        int kv_seq_len,
-//        int head_dim,
-        score_mod_fn score_mod,
-        mask_cond_fn mask_cond,
-        float v_scale
-) {
-    int batch_size = 1;
-    int num_heads = 32;
-    int q_seq_len = 4096;
-    int kv_seq_len = 4096;
-    int head_dim = 128;
-    // Math constants
-    float log2e = log2f(expf(1.0f));
-    float scale_factor = log2e / sqrtf((float)head_dim);
+// (B, H, Q, K)  — s, s_exp
+#define IDX_QK(b, h, i, j) ((((b) * H + (h)) * Q + (i)) * K + (j))
+// (B, H, Q, D)  — q, sv, out
+#define IDX_QD(b, h, i, d) ((((b) * H + (h)) * Q + (i)) * D + (d))
+// (B, H, K, D)  — k, v
+#define IDX_KD(b, h, j, d) ((((b) * H + (h)) * K + (j)) * D + (d))
+// (B, H, Q)     — s_max, s_expsum
+#define IDX_3D(b, h, i)    (((b) * H + (h)) * Q + (i))
 
-    // Allocate intermediate tensors exactly as defined in the TE expressions
-    float* s = (float*)malloc(batch_size * num_heads * q_seq_len * kv_seq_len * sizeof(float));
-    float* s_max = (float*)malloc(batch_size * num_heads * q_seq_len * sizeof(float));
-    float* s_exp = (float*)malloc(batch_size * num_heads * q_seq_len * kv_seq_len * sizeof(float));
-    float* s_expsum = (float*)malloc(batch_size * num_heads * q_seq_len * sizeof(float));
-    float* sv = (float*)malloc(batch_size * num_heads * q_seq_len * head_dim * sizeof(float));
-
-    // 1. s = batch_matmul(q, k, rhs_trans=True)
-    for (int b = 0; b < batch_size; ++b) {
-        for (int h = 0; h < num_heads; ++h) {
-            for (int i = 0; i < q_seq_len; ++i) {
-                for (int j = 0; j < kv_seq_len; ++j) {
-                    for (int d = 0; d < head_dim; ++d) {
-                        s[IDX4D(b, h, i, j, num_heads, q_seq_len, kv_seq_len)] += q[IDX4D(b, h, i, d, num_heads, q_seq_len, head_dim)] * k[IDX4D(b, h, j, d, num_heads, kv_seq_len, head_dim)];
-                    }
-                }
-            }
-        }
-    }
-
-    // 3. s_max = te.max(s, axis=k)  (T_softmax_maxelem)
-    for (int b = 0; b < batch_size; ++b) {
-        for (int h = 0; h < num_heads; ++h) {
-            for (int i = 0; i < q_seq_len; ++i) {
-                // 1. Initialize the accumulator directly in memory (No scalars!)
-                s_max[IDX3D(b, h, i, num_heads, q_seq_len)] = -INFINITY;
-                for (int j = 0; j < kv_seq_len; ++j) {
-                    // 2. Reduce directly into memory using a standard math intrinsic (No if-statements!)
-                    s_max[IDX3D(b, h, i, num_heads, q_seq_len)] = fmaxf(
-                            s_max[IDX3D(b, h, i, num_heads, q_seq_len)],
-                            s[IDX4D(b, h, i, j, num_heads, q_seq_len, kv_seq_len)]
-                    );
-                }
-            }
-        }
-    }
-
-    // 4. s_exp = tir.exp2(s - s_max)  (T_softmax_exp)
-    for (int b = 0; b < batch_size; ++b) {
-        for (int h = 0; h < num_heads; ++h) {
-            for (int i = 0; i < q_seq_len; ++i) {
-                for (int j = 0; j < kv_seq_len; ++j) {
-                    s_exp[IDX4D(b, h, i, j, num_heads, q_seq_len, kv_seq_len)] = exp2f(s[IDX4D(b, h, i, j, num_heads, q_seq_len, kv_seq_len)] - s_max[IDX3D(b, h, i, num_heads, q_seq_len)]);
-                }
-            }
-        }
-    }
-
-    // 5. s_expsum = te.sum(s_exp, axis=k)  (T_softmax_expsum)
-    for (int b = 0; b < batch_size; ++b) {
-        for (int h = 0; h < num_heads; ++h) {
-            for (int i = 0; i < q_seq_len; ++i) {
-                for (int j = 0; j < kv_seq_len; ++j) {
-                    s_expsum[IDX3D(b, h, i, num_heads, q_seq_len)] += s_exp[IDX4D(b, h, i, j, num_heads, q_seq_len, kv_seq_len)];
-                }
-            }
-        }
-    }
-
-    // 6. sv = batch_matmul(s_exp, v, rhs_trans=False)
-    for (int b = 0; b < batch_size; ++b) {
-        for (int h = 0; h < num_heads; ++h) {
-            for (int i = 0; i < q_seq_len; ++i) {
-                for (int d = 0; d < head_dim; ++d) {
-                    for (int j = 0; j < kv_seq_len; ++j) {
-                        sv[IDX4D(b, h, i, d, num_heads, q_seq_len, head_dim)] += s_exp[IDX4D(b, h, i, j, num_heads, q_seq_len, kv_seq_len)] * v[IDX4D(b, h, j, d, num_heads, kv_seq_len, head_dim)];
-                    }
-                }
-            }
-        }
-    }
-
-    // 7. sv = sv / s_expsum and v_scale multiplication (T_softmax_norm and T_cast)
-    for (int b = 0; b < batch_size; ++b) {
-        for (int h = 0; h < num_heads; ++h) {
-            for (int i = 0; i < q_seq_len; ++i) {
-                for (int d = 0; d < head_dim; ++d) {
-                    out[IDX4D(b, h, i, d, num_heads, q_seq_len, head_dim)] = sv[IDX4D(b, h, i, d, num_heads, q_seq_len, head_dim)] / s_expsum[IDX3D(b, h, i, num_heads, q_seq_len)] * v_scale;
-                }
-            }
-        }
-    }
-
-    // Free intermediate memory
-    free(s);
-    free(s_max);
-    free(s_exp);
-    free(s_expsum);
-    free(sv);
+// Phase 1: s = q @ k^T  (batch matmul, reduction over d)
+extern "C" void attn_qk(const float* __restrict q,
+                        const float* __restrict k,
+                        float* __restrict s) {
+    for (int b = 0; b < B; ++b)
+        for (int h = 0; h < H; ++h)
+            for (int i = 0; i < Q; ++i)
+                for (int j = 0; j < K; ++j)
+                    for (int d = 0; d < D; ++d)
+                        s[IDX_QK(b, h, i, j)] +=
+                            q[IDX_QD(b, h, i, d)] * k[IDX_KD(b, h, j, d)];
 }
 
-#undef IDX4D
-#undef IDX3D
+// Phase 2a: s_max = -INFINITY  (init for the row-wise max)
+extern "C" void attn_smax_init(float* __restrict s_max) {
+    for (int b = 0; b < B; ++b)
+        for (int h = 0; h < H; ++h)
+            for (int i = 0; i < Q; ++i)
+                s_max[IDX_3D(b, h, i)] = -INFINITY;
+}
+
+// Phase 2b: s_max = max_j s[..,j]  (reduction over j)
+extern "C" void attn_smax_reduce(const float* __restrict s,
+                                 float* __restrict s_max) {
+    for (int b = 0; b < B; ++b)
+        for (int h = 0; h < H; ++h)
+            for (int i = 0; i < Q; ++i)
+                for (int j = 0; j < K; ++j)
+                    s_max[IDX_3D(b, h, i)] =
+                        fmaxf(s_max[IDX_3D(b, h, i)], s[IDX_QK(b, h, i, j)]);
+}
+
+// Phase 3: s_exp = exp2(s - s_max)  (elementwise)
+extern "C" void attn_sexp(const float* __restrict s,
+                          const float* __restrict s_max,
+                          float* __restrict s_exp) {
+    for (int b = 0; b < B; ++b)
+        for (int h = 0; h < H; ++h)
+            for (int i = 0; i < Q; ++i)
+                for (int j = 0; j < K; ++j)
+                    s_exp[IDX_QK(b, h, i, j)] =
+                        exp2f(s[IDX_QK(b, h, i, j)] - s_max[IDX_3D(b, h, i)]);
+}
+
+// Phase 4: s_expsum = sum_j s_exp[..,j]  (reduction over j)
+extern "C" void attn_expsum(const float* __restrict s_exp,
+                            float* __restrict s_expsum) {
+    for (int b = 0; b < B; ++b)
+        for (int h = 0; h < H; ++h)
+            for (int i = 0; i < Q; ++i)
+                for (int j = 0; j < K; ++j)
+                    s_expsum[IDX_3D(b, h, i)] += s_exp[IDX_QK(b, h, i, j)];
+}
+
+// Phase 5: sv = s_exp @ v  (batch matmul, reduction over j)
+extern "C" void attn_sv(const float* __restrict s_exp,
+                        const float* __restrict v,
+                        float* __restrict sv) {
+    for (int b = 0; b < B; ++b)
+        for (int h = 0; h < H; ++h)
+            for (int i = 0; i < Q; ++i)
+                for (int d = 0; d < D; ++d)
+                    for (int j = 0; j < K; ++j)
+                        sv[IDX_QD(b, h, i, d)] +=
+                            s_exp[IDX_QK(b, h, i, j)] * v[IDX_KD(b, h, j, d)];
+}
+
+// Phase 6: out = sv / s_expsum * v_scale  (elementwise normalize + scale)
+extern "C" void attn_normalize(const float* __restrict sv,
+                               const float* __restrict s_expsum,
+                               float* __restrict out,
+                               float v_scale) {
+    for (int b = 0; b < B; ++b)
+        for (int h = 0; h < H; ++h)
+            for (int i = 0; i < Q; ++i)
+                for (int d = 0; d < D; ++d)
+                    out[IDX_QD(b, h, i, d)] =
+                        sv[IDX_QD(b, h, i, d)] / s_expsum[IDX_3D(b, h, i)] *
+                        v_scale;
+}
