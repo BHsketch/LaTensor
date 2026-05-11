@@ -1082,20 +1082,33 @@ struct ArgInfo {
 };
 
 struct BufferInfo {
-    std::string memref_name; // "MemRef0"
-    std::string arg_name;    // "A"
-    std::string cpp_type;    // "const float*"
-    std::string dtype;       // "float32"
-    long size;               // # of elements in the 1D buffer
+    std::string memref_name;  // "MemRef0"
+    std::string arg_name;     // "A"
+    std::string cpp_type;     // "const float*"
+    std::string dtype;        // "float32"
+    std::vector<long> shape;  // per-dim element counts; size()==1 for 1D
 };
+
+static llvm::DICompositeType *unwrapToArrayType(llvm::DIType *T);
 
 // Recurse through DIDerivedType (pointer / const / typedef / restrict /
 // volatile / atomic) until we hit a DIBasicType, formatting the cpp source
 // type along the way. Returns a string containing "?" if the type can't be
 // reduced — caller treats that as an unsupported-type failure.
+//
+// Array-typed parameters (`double C[N][M]`) are decayed to a single
+// pointer-to-element ("double*"). The full shape is captured separately
+// by extractArrayShape so that downstream code (T.Buffer emission, DLTensor
+// setup) can rebuild the multi-D view while the C++ wrapper signature stays
+// a flat pointer — ABI-identical at the LLVM IR level.
 static std::string formatDIType(llvm::DIType *T) {
     if (!T)
         return "void";
+    // Catch array-shaped params (raw array or parameter-decayed
+    // pointer-to-array) up front so the cppType is `<elem>*` regardless of
+    // the dim count.
+    if (auto *Arr = unwrapToArrayType(T))
+        return formatDIType(Arr->getBaseType()) + "*";
     if (auto *D = llvm::dyn_cast<llvm::DIDerivedType>(T)) {
         llvm::DIType *base = D->getBaseType();
         switch (D->getTag()) {
@@ -1118,6 +1131,43 @@ static std::string formatDIType(llvm::DIType *T) {
     if (auto *B = llvm::dyn_cast<llvm::DIBasicType>(T))
         return B->getName().str();
     return "?";
+}
+
+// Walk through typedef-like wrappers, and through a single
+// DW_TAG_pointer_type layer (the C parameter-adjustment shell), to find
+// an underlying DW_TAG_array_type. Returns null if none is reachable.
+// Used only by formatDIType to recognize array-shaped parameters and
+// emit them as a single decayed pointer type ("double*").
+static llvm::DICompositeType *unwrapToArrayType(llvm::DIType *T) {
+    bool stripped_pointer = false;
+    while (T) {
+        if (auto *C = llvm::dyn_cast<llvm::DICompositeType>(T))
+            return C->getTag() == llvm::dwarf::DW_TAG_array_type ? C : nullptr;
+        auto *D = llvm::dyn_cast<llvm::DIDerivedType>(T);
+        if (!D)
+            return nullptr;
+        switch (D->getTag()) {
+        case llvm::dwarf::DW_TAG_typedef:
+        case llvm::dwarf::DW_TAG_const_type:
+        case llvm::dwarf::DW_TAG_volatile_type:
+        case llvm::dwarf::DW_TAG_restrict_type:
+        case llvm::dwarf::DW_TAG_atomic_type:
+            T = D->getBaseType();
+            continue;
+        case llvm::dwarf::DW_TAG_pointer_type:
+            // Permit exactly one pointer layer (the parameter-decay form
+            // for `T arr[N][M]`). A second pointer means an honest
+            // pointer-to-pointer — not an array-shaped parameter.
+            if (stripped_pointer)
+                return nullptr;
+            stripped_pointer = true;
+            T = D->getBaseType();
+            continue;
+        default:
+            return nullptr;
+        }
+    }
+    return nullptr;
 }
 
 // Pull each cpp argument's source-level name and type from the function's
@@ -1197,11 +1247,25 @@ static std::optional<std::string> ptrTypeToDtype(const std::string &cppType) {
     return std::nullopt;
 }
 
-// Compute a constant 1D buffer size = max(access-relation range, dim 0) + 1
-// across all MAs touching this SAI. Returns -1 if the SCoP has no array
-// accesses for this SAI, if the access space isn't 1D, or if the max isn't a
-// known constant integer (e.g. depends on a parametric N).
-static long computeBufferSize(polly::ScopArrayInfo *SAI, polly::Scop &S) {
+// Map cpp scalar type to the TIR scalar-type annotation used in
+// `def main(name: T.<type>, ...)`. nullopt for unsupported scalars (e.g.
+// struct, pointer-to-pointer); those don't appear in the prim_func.
+static std::optional<std::string> scalarTypeToTir(const std::string &cppType) {
+    if (cppType == "int" || cppType == "const int")
+        return std::string("T.int32");
+    if (cppType == "float" || cppType == "const float")
+        return std::string("T.float32");
+    if (cppType == "double" || cppType == "const double")
+        return std::string("T.float64");
+    return std::nullopt;
+}
+
+// Build the union of access-relation ranges over all MAs touching this
+// SAI, intersected with each stmt's domain so the resulting set reflects
+// only index values that actually occur during execution. Returns nullptr
+// if no array MAs reference this SAI.
+static isl_set *accumulateAccessRange(polly::ScopArrayInfo *SAI,
+                                      polly::Scop &S) {
     isl_set *acc_union = nullptr;
     for (polly::ScopStmt &Stmt : S) {
         for (polly::MemoryAccess *MA : Stmt) {
@@ -1209,11 +1273,6 @@ static long computeBufferSize(polly::ScopArrayInfo *SAI, polly::Scop &S) {
                 continue;
             if (!MA->isArrayKind())
                 continue;
-            // The access relation maps the stmt's iteration variables to
-            // array index space; on its own the iteration variables are
-            // unbounded, which makes the range unbounded too. Intersect
-            // with the stmt's domain so the resulting range reflects only
-            // index values that actually occur during execution.
             isl::map AR = MA->getAccessRelation();
             isl::set Domain = Stmt.getDomain();
             isl_map *AR_bounded =
@@ -1222,27 +1281,52 @@ static long computeBufferSize(polly::ScopArrayInfo *SAI, polly::Scop &S) {
             acc_union = acc_union ? isl_set_union(acc_union, Range) : Range;
         }
     }
-    if (!acc_union)
-        return -1;
-    acc_union = isl_set_coalesce(acc_union);
-    unsigned ndim = isl_set_dim(acc_union, isl_dim_set);
-    if (ndim != 1) {
-        // Multi-dim Polly modeling isn't supported by the existing body
-        // emitter (buildMathematicalAccess only reads dim 0).
-        isl_set_free(acc_union);
-        return -1;
-    }
+    if (acc_union)
+        acc_union = isl_set_coalesce(acc_union);
+    return acc_union;
+}
 
-    isl_val *v = isl_set_dim_max_val(acc_union, 0); // consumes acc_union
+// Extract the constant max value of `dim` in `set` + 1. Returns -1 if not
+// a finite known integer. Does not consume `set`.
+static long isl_dim_extent(isl_set *set, unsigned dim) {
+    isl_val *v = isl_set_dim_max_val(isl_set_copy(set), dim);
     long maxIdx = -1;
     if (v && isl_val_is_int(v) == isl_bool_true &&
         isl_val_is_nan(v) != isl_bool_true) {
         maxIdx = isl_val_get_num_si(v);
     }
     isl_val_free(v);
-    if (maxIdx < 0)
-        return -1;
-    return maxIdx + 1;
+    return maxIdx < 0 ? -1 : maxIdx + 1;
+}
+
+// Compute the buffer shape for this SAI directly from Polly's access
+// space rank. Each dim's extent is max(access range, dim d) + 1.
+// Returns an empty vector if no MAs reference this SAI or any dim's max
+// isn't a finite constant int (e.g. parametric loop bound).
+//
+// The rank-of-shape mirrors the body emitter (buildMathematicalAccess),
+// which prints one index expression per Polly access-space dim: when
+// Polly delinearizes multi-D accesses, the body uses `C[vi0, vi1]` and
+// the buffer is multi-D; when Polly linearizes to a single dim, the
+// body uses `C[stride*vi0 + vi1]` and the buffer is flat 1D of the
+// linearized total. Either way the shape here matches the body.
+static std::vector<long> computeBufferShape(polly::ScopArrayInfo *SAI,
+                                            polly::Scop &S) {
+    std::vector<long> shape;
+    isl_set *acc_union = accumulateAccessRange(SAI, S);
+    if (!acc_union)
+        return shape;
+    unsigned ndim = isl_set_dim(acc_union, isl_dim_set);
+    for (unsigned d = 0; d < ndim; ++d) {
+        long ext = isl_dim_extent(acc_union, d);
+        if (ext < 0) {
+            shape.clear();
+            break;
+        }
+        shape.push_back(ext);
+    }
+    isl_set_free(acc_union);
+    return shape;
 }
 
 // For each Polly array in the SCoP, find which function argument backs it
@@ -1277,13 +1361,14 @@ mapBuffersToArgs(polly::Scop &S, llvm::Function &F,
                    << " has unsupported cpp type " << ai.cppType << "\n";
             return std::nullopt;
         }
-        long size = computeBufferSize(SAI, S);
-        if (size < 0) {
-            errs() << "  [LATENSOR] couldn't compute constant size for MemRef "
+        std::vector<long> shape = computeBufferShape(SAI, S);
+        if (shape.empty()) {
+            errs() << "  [LATENSOR] couldn't compute constant shape for MemRef "
                    << SAI->getName() << "\n";
             return std::nullopt;
         }
-        BufferInfo bi{SAI->getName(), ai.name, ai.cppType, *dtype, size};
+        BufferInfo bi{SAI->getName(), ai.name, ai.cppType, *dtype,
+                      std::move(shape)};
         out[bi.memref_name] = bi;
     }
     return out;
@@ -1348,23 +1433,58 @@ composeFrame(const std::string &fnName, const std::vector<ArgInfo> &args,
     }
     f << "\n";
 
+    // Rename MemRef# → arg names and swap tir-vs-tirx primitives up front
+    // so we can scan the transformed body for which scalar args it actually
+    // references. Unused scalars stay out of the prim_func signature, which
+    // keeps existing pointer-only-kernel tests bit-identical.
+    std::string transformed = tirxifyBody(renameMemRefs(raw_body, memref_to_buf));
+
+    std::map<std::string, const BufferInfo *> bufByArgName;
+    for (const auto &bi : orderedBufs)
+        bufByArgName[bi.arg_name] = &bi;
+
     f << "===\n";
     f << "@T.prim_func\n";
     f << "def main(";
-    for (size_t i = 0; i < orderedBufs.size(); ++i) {
-        if (i)
-            f << ", ";
-        f << orderedBufs[i].arg_name << ": T.Buffer((" << orderedBufs[i].size
-          << ",), \"" << orderedBufs[i].dtype << "\")";
+    bool first_param = true;
+    for (const auto &ai : args) {
+        auto bufIt = bufByArgName.find(ai.name);
+        if (bufIt != bufByArgName.end()) {
+            const auto &bi = *bufIt->second;
+            if (!first_param)
+                f << ", ";
+            first_param = false;
+            f << ai.name << ": T.Buffer((";
+            for (size_t d = 0; d < bi.shape.size(); ++d) {
+                if (d)
+                    f << ", ";
+                f << bi.shape[d];
+            }
+            // Trailing comma so 1D shapes stay a 1-tuple in Python syntax.
+            if (bi.shape.size() == 1)
+                f << ",";
+            f << "), \"" << bi.dtype << "\")";
+        } else if (!isPtrType(ai.cppType)) {
+            // Scalar arg: include only if the body references it. Unused
+            // scalars (e.g. loop-bound params that got constant-folded
+            // away under POLYBENCH_USE_SCALAR_LB) stay out of the
+            // signature so the wrapper doesn't have to pass them.
+            auto tirType = scalarTypeToTir(ai.cppType);
+            if (!tirType)
+                continue;
+            std::regex word_re("\\b" + ai.name + "\\b");
+            if (!std::regex_search(transformed, word_re))
+                continue;
+            if (!first_param)
+                f << ", ";
+            first_param = false;
+            f << ai.name << ": " << *tirType;
+        }
+        // Pointer args not present in bufByArgName are unused by the SCoP
+        // and intentionally omitted (existing behavior).
     }
     f << "):\n";
     f << "    T.func_attr({\"tirx.noalias\": True})\n";
-
-    // Rename MemRef# → arg names, swap any tir-vs-tirx primitives, then
-    // indent the whole body by 4 spaces so it sits inside `def main`.
-    // indent_lines() is the existing helper in this namespace; reuse to
-    // keep formatting consistent with BlockInfo.
-    std::string transformed = tirxifyBody(renameMemRefs(raw_body, memref_to_buf));
     if (!transformed.empty()) {
         f << indent_lines(transformed);
         if (transformed.back() != '\n')

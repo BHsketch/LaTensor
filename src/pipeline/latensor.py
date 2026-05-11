@@ -51,11 +51,18 @@ class Frame:
         self.tvm_buffers = tvm_buffers  # list[str] — names from args
         self.tir_source = tir_source  # str — TVMScript source
         self.tir_sha = hashlib.sha256(tir_source.encode()).hexdigest()[:8]
-        self.buffers = self._parse_buffers()  # {name: (shape, dtype)}
+        # main_params: ordered list of (name, kind, info) where
+        #   kind == 'buffer' → info = (shape_tuple, dtype_str)
+        #   kind == 'scalar' → info = tir_type_str (e.g. 'float64')
+        # Order matches the def main(...) signature exactly, so wrapper
+        # call-site args go in the right order.
+        self.main_params = self._parse_main_params()
+        self.buffers = {n: i for n, k, i in self.main_params if k == 'buffer'}
 
-    def _parse_buffers(self):
-        """Walk `def main(...)` in the TIR source to extract per-arg
-        (shape_tuple, dtype_str) from the T.Buffer(...) annotations."""
+    def _parse_main_params(self):
+        """Walk `def main(...)` in the TIR source and produce an ordered
+        list of (name, kind, info) entries — buffers carry (shape, dtype),
+        scalars carry the TIR scalar-type name."""
         tree = ast.parse(self.tir_source)
         funcdef = None
         for n in ast.walk(tree):
@@ -67,18 +74,28 @@ class Frame:
                 f"[{self.function}] TIR source has no top-level `main` def"
             )
 
-        out = {}
+        out = []
         for a in funcdef.args.args:
             ann = a.annotation
-            if not isinstance(ann, ast.Call):
-                continue
-            if not (isinstance(ann.func, ast.Attribute)
+            # T.Buffer((shape,), "dtype")
+            if (isinstance(ann, ast.Call)
+                    and isinstance(ann.func, ast.Attribute)
                     and ann.func.attr == "Buffer"):
+                shape_node, dtype_node = ann.args[0], ann.args[1]
+                shape = tuple(_eval_int(e) for e in shape_node.elts)
+                dtype = dtype_node.value
+                out.append((a.arg, 'buffer', (shape, dtype)))
                 continue
-            shape_node, dtype_node = ann.args[0], ann.args[1]
-            shape = tuple(_eval_int(e) for e in shape_node.elts)
-            dtype = dtype_node.value
-            out[a.arg] = (shape, dtype)
+            # T.<scalar_type> (e.g. T.float64, T.int32)
+            if (isinstance(ann, ast.Attribute)
+                    and isinstance(ann.value, ast.Name)
+                    and ann.value.id == 'T'):
+                out.append((a.arg, 'scalar', ann.attr))
+                continue
+            raise RuntimeError(
+                f"[{self.function}] unrecognized annotation for "
+                f"prim_func param {a.arg!r}: {ast.dump(ann)}"
+            )
         return out
 
 
@@ -191,11 +208,12 @@ def render_dltensor_block(arg_name, cpp_type, shape, dtype):
     )
 
 
-def render_cpp_signature(args, scalar_names):
-    """Render the C parameter list, marking unused scalars [[maybe_unused]]."""
+def render_cpp_signature(args, unused_names):
+    """Render the C parameter list, marking args not consumed by the TVM
+    call site as [[maybe_unused]]."""
     parts = []
     for name, ctype in args:
-        if name in scalar_names:
+        if name in unused_names:
             parts.append(f"[[maybe_unused]] {ctype} {name}")
         else:
             parts.append(f"{ctype} {name}")
@@ -204,24 +222,33 @@ def render_cpp_signature(args, scalar_names):
 
 def render_wrapper(frame, lib_path):
     template = string.Template(WRAPPER_TEMPLATE.read_text())
-    scalar_names = {n for n, t in frame.args if not is_pointer(t)}
-    cpp_signature = render_cpp_signature(frame.args, scalar_names)
+    # Anything not in main_params is unused by the TVM kernel — mark it
+    # [[maybe_unused]] in the C++ wrapper signature.
+    used_names = {n for n, _, _ in frame.main_params}
+    unused_names = {n for n, _ in frame.args if n not in used_names}
+    cpp_signature = render_cpp_signature(frame.args, unused_names)
 
+    arg_ctype = {n: t for n, t in frame.args}
     blocks = []
-    for buf_name in frame.tvm_buffers:
-        ctype = next(t for n, t in frame.args if n == buf_name)
-        if not is_pointer(ctype):
-            raise RuntimeError(
-                f"[{frame.function}] tvm_buffers entry {buf_name} is not a pointer"
-            )
-        if buf_name not in frame.buffers:
-            raise RuntimeError(
-                f"[{frame.function}] no T.Buffer annotation for {buf_name} in TIR"
-            )
-        shape, dtype = frame.buffers[buf_name]
-        blocks.append(render_dltensor_block(buf_name, ctype, shape, dtype))
-
-    call_args = ", ".join(f"&__dl_{b}" for b in frame.tvm_buffers)
+    call_parts = []
+    for name, kind, info in frame.main_params:
+        if kind == 'buffer':
+            ctype = arg_ctype.get(name)
+            if ctype is None or not is_pointer(ctype):
+                raise RuntimeError(
+                    f"[{frame.function}] T.Buffer param {name!r} has no "
+                    f"pointer-typed match in args"
+                )
+            shape, dtype = info
+            blocks.append(render_dltensor_block(name, ctype, shape, dtype))
+            call_parts.append(f"&__dl_{name}")
+        else:
+            # Scalar arg passed through to the TVM call by value. Any
+            # value-narrowing (e.g. C double → TIR float32) would need a
+            # cast here; today the type map in scalarTypeToTir matches the
+            # C type exactly so the original arg name is passed verbatim.
+            call_parts.append(name)
+    call_args = ", ".join(call_parts)
 
     return template.substitute(
         function_name=frame.function,
