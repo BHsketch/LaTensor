@@ -25,7 +25,7 @@ Converts polybench tests into TVM format. We are currently unable to run the ful
 
 run `bash src/pipeline/benchmark_polybench.sh`.
 
-This will run 3 hand-picked benchmarks from polybench through our pipeline. Then view results at `src/pipeline/build_dir/polybench/<path_to_benchmark>/stdout.log`.
+This will run a few hand-picked benchmarks from polybench through our pipeline. Then view results at `src/pipeline/build_dir/polybench/<path_to_benchmark>/stdout.log`.
 
 here, path_to_benchmark is any from the following list:
   \["linear-algebra/kernels/mvt/mvt",
