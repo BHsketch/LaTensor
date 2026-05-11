@@ -63,12 +63,12 @@ MICRO_BENCHMARKS=(
 # the frame contract grow to cover them. Run a benchmark by hand against
 # benchmark_list to see why it's not here.
 POLYBENCH_BENCHMARKS=(
-    #"linear-algebra/kernels/mvt/mvt"
+    "linear-algebra/kernels/mvt/mvt"
     "linear-algebra/blas/gemm/gemm"
-    #"linear-algebra/blas/syr2k/syr2k"
-    #"linear-algebra/blas/syrk/syrk"
-    #"medley/deriche/deriche"
-    #"medley/nussinov/nussinov"
+    "linear-algebra/blas/syr2k/syr2k"
+    "linear-algebra/blas/syrk/syrk"
+    "medley/deriche/deriche"
+    "medley/nussinov/nussinov"
 )
 
 set -e
