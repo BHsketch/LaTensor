@@ -9,6 +9,8 @@ CLANG="${LLVM}/clang++"
 OPT="${LLVM}/opt"
 CORE="/home/bhavya/cosmos/life/UIUC/academics/coursework/CS526/latensor/src/core"
 
+rm -rf *.jscop
+
 echo "Using clang version: $(${CLANG} --version)"
 
 cd "${BENCH}"
