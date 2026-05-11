@@ -150,88 +150,97 @@ std::string buildMathematicalAccess(polly::MemoryAccess *MA) {
     // 1. Get the Array Name (e.g., "MemRef1")
     std::string array_name = MA->getScopArrayInfo()->getName();
 
-    // 2. Get the access relation and convert it to a piecewise multi-affine
-    // expression
+    // 2. Get the access relation and convert it to a piecewise multi-affine expression
     isl::map access_map = MA->getAccessRelation();
     isl::pw_multi_aff pma = isl::pw_multi_aff::from_map(access_map);
 
     // Release to the C API for deep inspection
     isl_pw_multi_aff *pma_c = pma.release();
-    std::string index_expr = "";
 
-    // An access might theoretically have multiple piecewise conditions (e.g.,
-    // if/else inside loop) For standard loops, there is only one piece. We
-    // extract it using a callback:
     isl_multi_aff *ma = nullptr;
     isl_pw_multi_aff_foreach_piece(
-        pma_c,
-        [](isl_set *set, isl_multi_aff *m_aff, void *user) -> isl_stat {
-            isl_multi_aff **ma_ptr = static_cast<isl_multi_aff **>(user);
-            if (!*ma_ptr) {
-                *ma_ptr = isl_multi_aff_copy(
-                    m_aff); // Copy the first math piece we find
-            }
-            isl_set_free(set);
-            isl_multi_aff_free(m_aff);
-            return isl_stat_ok;
-        },
-        &ma);
+            pma_c,
+            [](isl_set *set, isl_multi_aff *m_aff, void *user) -> isl_stat {
+                isl_multi_aff **ma_ptr = static_cast<isl_multi_aff **>(user);
+                if (!*ma_ptr) {
+                    *ma_ptr = isl_multi_aff_copy(m_aff); // Copy the first math piece we find
+                }
+                isl_set_free(set);
+                isl_multi_aff_free(m_aff);
+                return isl_stat_ok;
+            },
+            &ma);
+
+    std::string full_access = array_name + "[";
 
     if (ma) {
-        // We want the math for the 1st dimension of the array access (Index 0)
-        // E.g., for MemRef1[128 * i0 + i1], this gets the (128 * i0 + i1)
-        // expression
-        isl_aff *aff = isl_multi_aff_get_aff(ma, 0);
+        // NEW: Get the number of array dimensions (Output dimensions)
+        int num_out_dims = isl_multi_aff_dim(ma, isl_dim_out);
 
-        // How many loop iterators (i0, i1, i2) does this math use?
-        int num_in_dims = isl_aff_dim(aff, isl_dim_in);
+        for (int out_d = 0; out_d < num_out_dims; ++out_d) {
+            // Get the math expression for THIS specific array dimension
+            isl_aff *aff = isl_multi_aff_get_aff(ma, out_d);
 
-        bool is_first = true;
+            // How many loop iterators (i0, i1, i2) does this math use?
+            int num_in_dims = isl_aff_dim(aff, isl_dim_in);
 
-        // 3. EXTRACT THE COEFFICIENTS (e.g., the '128' in 128*vi0)
-        for (int i = 0; i < num_in_dims; ++i) {
-            // Get the integer multiplier for dimension 'i'
-            isl_val *coef_val = isl_aff_get_coefficient_val(aff, isl_dim_in, i);
-            long coef = isl_val_get_num_si(coef_val);
-            isl_val_free(coef_val);
+            std::string index_expr = "";
+            bool is_first = true;
 
-            if (coef != 0) {
+            // 3. EXTRACT THE COEFFICIENTS (e.g., the '128' in 128*vi0)
+            for (int i = 0; i < num_in_dims; ++i) {
+                isl_val *coef_val = isl_aff_get_coefficient_val(aff, isl_dim_in, i);
+                long coef = isl_val_get_num_si(coef_val);
+                isl_val_free(coef_val);
+
+                if (coef != 0) {
+                    if (!is_first)
+                        index_expr += " + ";
+
+                    if (coef == 1) {
+                        index_expr += "vi" + std::to_string(i);
+                    } else {
+                        index_expr += std::to_string(coef) + " * vi" + std::to_string(i);
+                    }
+                    is_first = false;
+                }
+            }
+
+            // 4. EXTRACT THE CONSTANT (e.g., the '7' in vi0 + 7)
+            isl_val *const_val = isl_aff_get_constant_val(aff);
+            long const_term = isl_val_get_num_si(const_val);
+            isl_val_free(const_val);
+
+            if (const_term != 0) {
                 if (!is_first)
                     index_expr += " + ";
-
-                if (coef == 1) {
-                    index_expr += "vi" + std::to_string(i);
-                } else {
-                    index_expr +=
-                        std::to_string(coef) + " * vi" + std::to_string(i);
-                }
-                is_first = false;
+                index_expr += std::to_string(const_term);
             }
+
+            if (index_expr.empty())
+                index_expr = "0";
+
+            // Append this dimension's math to our final string
+            full_access += index_expr;
+
+            // If there are more dimensions, add a comma!
+            if (out_d < num_out_dims - 1) {
+                full_access += ", ";
+            }
+
+            isl_aff_free(aff);
         }
 
-        // 4. EXTRACT THE CONSTANT (e.g., the '7' in vi0 + 7)
-        isl_val *const_val = isl_aff_get_constant_val(aff);
-        long const_term = isl_val_get_num_si(const_val);
-        isl_val_free(const_val);
-
-        if (const_term != 0) {
-            if (!is_first)
-                index_expr += " + ";
-            index_expr += std::to_string(const_term);
-
-            // NOTE: `my_iter_info.added_const = const_term;`
-        }
-
-        if (index_expr.empty())
-            index_expr = "0";
-
-        isl_aff_free(aff);
         isl_multi_aff_free(ma);
+    } else {
+        // Fallback if no math was found
+        full_access += "0";
     }
 
+    full_access += "]";
     isl_pw_multi_aff_free(pma_c);
 
-    return array_name + "[" + index_expr + "]";
+    return full_access;
 }
 
 // Helper to recursively reconstruct the math expression
@@ -1492,15 +1501,17 @@ struct MyPollyScopPass : public PassInfoMixin<MyPollyScopPass> {
                 }
             }
 
+            std::vector<std::shared_ptr<TreeNode>> LoopTree;
+            bool walk_ok = false;
             // 2. Build the entire tree of LoopInfos and BlockInfos!
             try {
-                std::vector<std::shared_ptr<TreeNode>> LoopTree =
-                        walkAST(RootNode, {}, stmt_classification);
+                LoopTree = walkAST(RootNode, {}, stmt_classification);
 
                 errs() << "TVM CODE IS:\n";
                 for (auto lt : LoopTree) {
                     errs() << lt->to_string();
                 }
+                walk_ok = true;
             } catch (const std::runtime_error &e) {
                 errs() << "SCoP could not be translated! " << e.what() << "\n";
             }
