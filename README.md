@@ -18,12 +18,15 @@ To just generate TVM code for polybench, one can also run:
 ```
 cd ../../tests
 ./run_polybench.sh
+```
 
 To attempt the entire pipeline on polybench:
 Converts polybench tests into TVM format. We are currently unable to run the full pipeline with these kernels. However, one can run a dummy pipeline over these benchmarks (which will fail in a few seconds), then view the results in the following way:
-run `bash src/pipeline/benchmark_polybench.sh`. This will run 3 hand-picked benchmarks from polybench through our pipeline. Then view results at `src/pipeline/build_dir/polybench/<path_to_benchmark>/stdout.log`.
 
-```
+run `bash src/pipeline/benchmark_polybench.sh`.
+
+This will run 3 hand-picked benchmarks from polybench through our pipeline. Then view results at `src/pipeline/build_dir/polybench/<path_to_benchmark>/stdout.log`.
+
 here, path_to_benchmark is any from the following list:
   \["linear-algebra/kernels/mvt/mvt",
     "linear-algebra/blas/gemm/gemm",
