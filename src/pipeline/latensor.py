@@ -26,6 +26,7 @@ import shlex
 import string
 import subprocess
 import sys
+import pathlib
 from pathlib import Path
 
 # ── Paths derived from this script's location ───────────────────────────────
@@ -267,12 +268,22 @@ def run(cmd, **kw):
     return subprocess.run(cmd, check=True, **kw)
 
 
-def run_capture_stdout(cmd, **kw):
+# def run_capture_stdout(cmd, **kw):
+    # sys.stderr.write(f"  $ {' '.join(str(c) for c in cmd)}\n")
+    # res = subprocess.run(cmd, check=True, capture_output=True, text=True, **kw)
+    # sys.stderr.write(res.stderr)
+    # return res.stdout
+
+def run_capture_stdout(cmd, log_dir=None, **kw):
     sys.stderr.write(f"  $ {' '.join(str(c) for c in cmd)}\n")
     res = subprocess.run(cmd, check=True, capture_output=True, text=True, **kw)
     sys.stderr.write(res.stderr)
+    if log_dir is not None:
+        log_dir = pathlib.Path(log_dir)
+        log_dir.mkdir(parents=True, exist_ok=True)
+        (log_dir / "stdout.log").write_text(res.stdout)
+        (log_dir / "stderr.log").write_text(res.stderr)
     return res.stdout
-
 
 # ── Pipeline steps ──────────────────────────────────────────────────────────
 
@@ -297,7 +308,7 @@ def run_polly_pass(opt, ll_file):
         str(ll_file),
         "-disable-output",
     ]
-    return run_capture_stdout(cmd)
+    return run_capture_stdout(cmd, log_dir=ll_file.parent)
 
 
 def export_kernel(frame, work_dir, out_lib, tuning_trials):

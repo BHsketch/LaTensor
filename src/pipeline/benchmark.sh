@@ -35,7 +35,8 @@ TUNING_TRIALS="${TUNING_TRIALS:-20}"
 # requires + POLYBENCH_TIME so each benchmark prints the kernel's elapsed
 # seconds to stdout (single floating-point number per run). Keeping these
 # together so they always move as one.
-POLYBENCH_DEFINES="-DMINI_DATASET -DPOLYBENCH_USE_SCALAR_LB -DPOLYBENCH_TIME"
+#POLYBENCH_DEFINES="-DMINI_DATASET -DPOLYBENCH_USE_SCALAR_LB -DPOLYBENCH_TIME"
+POLYBENCH_DEFINES="-DMEDIUM_DATASET -DPOLYBENCH_USE_SCALAR_LB -DPOLYBENCH_TIME"
 
 # ─── Loop 1: curated microbenchmarks ────────────────────────────────────────
 # Each entry is a subdirectory name under src/tests/ that contains a
@@ -43,6 +44,7 @@ POLYBENCH_DEFINES="-DMINI_DATASET -DPOLYBENCH_USE_SCALAR_LB -DPOLYBENCH_TIME"
 MICRO_BENCHMARKS=(
     "reduction_1"
     "mixed"
+    "matmul_naive"
     # add more here
 )
 
@@ -52,12 +54,12 @@ MICRO_BENCHMARKS=(
 # the frame contract grow to cover them. Run a benchmark by hand against
 # benchmark_list to see why it's not here.
 POLYBENCH_BENCHMARKS=(
-    "linear-algebra/kernels/mvt/mvt"
-    "linear-algebra/blas/gemm/gemm"
-    "linear-algebra/blas/syr2k/syr2k"
-    "linear-algebra/blas/syrk/syrk"
-    "medley/deriche/deriche"
-    "medley/nussinov/nussinov"
+    #"linear-algebra/kernels/mvt/mvt"
+    #"linear-algebra/blas/gemm/gemm"
+    #"linear-algebra/blas/syr2k/syr2k"
+    #"linear-algebra/blas/syrk/syrk"
+    #"medley/deriche/deriche"
+    #"medley/nussinov/nussinov"
 )
 
 set -e

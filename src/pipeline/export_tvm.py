@@ -82,6 +82,7 @@ def tune_and_export(tir_source, out_lib, work_dir, target, tuning_trials):
             work_dir=work_dir,
         )
 
+    print(mod) 
     sch = ms.tir_integration.compile_tir(database, mod, target)
     built = tvm.build(sch.mod["main"], target=target)
     built.export_library(out_lib)

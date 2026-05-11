@@ -478,7 +478,7 @@ struct BlockInfo : TreeNode {
 
     std::string to_string() {
         std::string s = "with T.block(\"" + this->name + "\"):\n";
-        // Combine all loop guards into one T.where!
+        
         std::shared_ptr<latensor::LoopInfo> loop = this->parent_loop;
         std::string combined_guard = "";
 
@@ -488,29 +488,24 @@ struct BlockInfo : TreeNode {
 
         while (loop) {
             if (!loop->guard_condition.empty()) {
-                if (combined_guard.empty())
-                    combined_guard += "T.where(";
-                else
-                    combined_guard += " and ";
-
                 std::string g = loop->guard_condition;
 
+                // RESTORED: Swap outer loop vars (c0, c1) for block vars (vi0, vi1) 
+                // because the 'if' statement lives inside the isolated block scope!
                 for (const auto &iv : iter_vars) {
                     for (const AxisMultiplier &am : iv.linear_combination) {
-                        std::regex word_regex("\\b" + am.loop_var->name +
-                                              "\\b");
+                        std::regex word_regex("\\b" + am.loop_var->name + "\\b");
                         g = std::regex_replace(g, word_regex, iv.name);
                     }
                 }
 
-                combined_guard += g;
+                if (combined_guard.empty())
+                    combined_guard += "(" + g + ")";
+                else
+                    combined_guard += " & (" + g + ")";
             }
-
             loop = loop->parent;
         }
-
-        if (!combined_guard.empty())
-            s += "    " + combined_guard + ")\n";
 
         s += "    T.reads(";
         for (int i = 0; i < this->reads.size(); i++) {
@@ -525,11 +520,79 @@ struct BlockInfo : TreeNode {
             s += this->writes[i].access_str;
         }
         s += ")\n";
-        for (const auto &st : this->compute_stmts) {
-            s += "    " + st.lhs + " = " + st.rhs + "\n";
+
+        // CHANGED: Instead of T.where, we use a structural if statement 
+        // inside the block body. TVMScript will automatically convert this 
+        // into a tir.IfThenElse node!
+        if (!combined_guard.empty()) {
+            s += "    if " + combined_guard + ":\n";
+            for (const auto &st : this->compute_stmts) {
+                // Notice the extra 4 spaces of indentation here!
+                s += "        " + st.lhs + " = " + st.rhs + "\n"; 
+            }
+        } else {
+            for (const auto &st : this->compute_stmts) {
+                s += "    " + st.lhs + " = " + st.rhs + "\n";
+            }
         }
+        
         return s;
     }
+
+    //std::string to_string() {
+        //std::string s = "with T.block(\"" + this->name + "\"):\n";
+        //// Combine all loop guards into one T.where!
+        //std::shared_ptr<latensor::LoopInfo> loop = this->parent_loop;
+        //std::string combined_guard = "";
+
+        //for (auto iv : iter_vars) {
+            //s += "    " + iv.to_string() + "\n";
+        //}
+
+        //while (loop) {
+            //if (!loop->guard_condition.empty()) {
+                //std::string g = loop->guard_condition;
+
+                ////for (const auto &iv : iter_vars) {
+                    ////for (const AxisMultiplier &am : iv.linear_combination) {
+                        ////std::regex word_regex("\\b" + am.loop_var->name +
+                                ////"\\b");
+                        ////g = std::regex_replace(g, word_regex, iv.name);
+                    ////}
+                ////}
+
+                //// CHANGED: Use '&' instead of 'and', and wrap 'g' in parentheses
+                //// to prevent Python operator precedence issues!
+                //if (combined_guard.empty())
+                    //combined_guard += "T.where((" + g + ")";
+                //else
+                    //combined_guard += " & (" + g + ")";
+            //}
+
+            //loop = loop->parent;
+        //}
+
+        //if (!combined_guard.empty())
+            //s += "    " + combined_guard + ")\n";
+
+        //s += "    T.reads(";
+        //for (int i = 0; i < this->reads.size(); i++) {
+            //if (i > 0)
+                //s += ", ";
+            //s += this->reads[i].access_str;
+        //}
+        //s += ")\n    T.writes(";
+        //for (int i = 0; i < this->writes.size(); i++) {
+            //if (i > 0)
+                //s += ", ";
+            //s += this->writes[i].access_str;
+        //}
+        //s += ")\n";
+        //for (const auto &st : this->compute_stmts) {
+            //s += "    " + st.lhs + " = " + st.rhs + "\n";
+        //}
+        //return s;
+    //}
 };
 
 struct ClassifyResult {
