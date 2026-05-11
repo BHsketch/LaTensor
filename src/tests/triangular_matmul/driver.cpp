@@ -3,7 +3,7 @@
 #include <iostream>
 #include <random>
 
-extern "C" void matmul_naive(const float* A, const float* B, float* C, int N);
+extern "C" void triangular_matmul(const float* A, const float* B, float* C, int N);
 
 static float* alloc_matrix(int N) {
     float* m = nullptr;
@@ -37,7 +37,7 @@ int main() {
 
     auto start = std::chrono::high_resolution_clock::now();
     for(int i=0; i<25; i++){
-        matmul_naive(A, B, C, N);
+        triangular_matmul(A, B, C, N);
     }
     auto end = std::chrono::high_resolution_clock::now();
 
@@ -54,3 +54,4 @@ int main() {
     free(A); free(B); free(C);
     return 0;
 }
+

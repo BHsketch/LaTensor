@@ -3,7 +3,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iostream>
 #include <random>
+#include <chrono>
 
 extern "C" void matmul_naive(const float* A, const float* B, float* C, int N);
 extern "C" void gather(const float* A, const int* idx, float* B, int N);
@@ -20,7 +22,7 @@ static T* aligned_buffer(size_t count) {
 }
 
 int main() {
-    constexpr int N = 128;
+    constexpr int N = 1024;
     std::mt19937 rng(42);
     std::uniform_real_distribution<float> dist(0.0f, 1.0f);
 
@@ -35,8 +37,23 @@ int main() {
         B[i] = dist(rng);
     }
 
-    matmul_naive(A, B, C, N);
+    int* idx = aligned_buffer<int>(N);
+    float* G = aligned_buffer<float>(N);
+    for (int i = 0; i < N; i++) idx[i] = (i * 7) % N;
 
+    // Timed region: kernels only.
+    auto start = std::chrono::high_resolution_clock::now();
+    for(int index=0; index<500; index++) {
+        matmul_naive(A, B, C, N);
+        gather(A, idx, G, N);
+    }
+    auto end = std::chrono::high_resolution_clock::now();
+
+    auto duration =
+        std::chrono::duration_cast<std::chrono::microseconds>(
+            end - start);
+
+    // Correctness checks (outside the timed region).
     for (int i = 0; i < N; i++) {
         for (int j = 0; j < N; j++) {
             float s = 0.0f;
@@ -44,17 +61,11 @@ int main() {
             C_ref[i * N + j] = s;
         }
     }
-
     double max_err = 0.0;
     for (int i = 0; i < N * N; i++) {
         max_err = std::max(max_err, (double)std::fabs(C[i] - C_ref[i]));
     }
     std::printf("matmul_naive: max_err = %.3e\n", max_err);
-
-    int* idx = aligned_buffer<int>(N);
-    float* G = aligned_buffer<float>(N);
-    for (int i = 0; i < N; i++) idx[i] = (i * 7) % N;
-    gather(A, idx, G, N);
 
     bool ok = true;
     for (int i = 0; i < N; i++) {
@@ -65,6 +76,9 @@ int main() {
     }
     std::printf("gather: %s\n", ok ? "OK" : "MISMATCH");
 
+    std::cout << "Execution time: "
+              << duration.count()
+              << " us\n";
     free(A);
     free(B);
     free(C);

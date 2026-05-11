@@ -1,4 +1,4 @@
-extern "C" void matmul_naive(const float* __restrict A, const float* __restrict B, float* __restrict C, int N) {
+extern "C" void triangular_matmul(const float* __restrict A, const float* __restrict B, float* __restrict C, int N) {
     N = 1024;
     for (int i = 0; i < N; i++) {
         for (int j = 0; j <= N; j++) {

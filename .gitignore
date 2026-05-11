@@ -16,6 +16,8 @@ claude_gen/
 # Build artifacts and analysis output
 *.ll
 *.out
+*.tvm
 src/core/build/
 .claude
 src/pipeline/__pycache__/
+src/pipeline/build_dir/
