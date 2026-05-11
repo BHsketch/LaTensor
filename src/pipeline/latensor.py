@@ -22,7 +22,7 @@ import ast
 import hashlib
 import os
 import re
-import shutil
+import shlex
 import string
 import subprocess
 import sys
@@ -249,13 +249,15 @@ def run_capture_stdout(cmd, **kw):
 
 # ── Pipeline steps ──────────────────────────────────────────────────────────
 
-def emit_llvm_ir(clang, kernel_cpp, out_ll):
-    run([
+def emit_llvm_ir(clang, kernel_cpp, out_ll, extra=()):
+    cmd = [
         str(clang),
         "-O0", "-Xclang", "-disable-O0-optnone", "-ffast-math",
         "-g", "-S", "-emit-llvm",
-        str(kernel_cpp), "-o", str(out_ll),
-    ])
+    ]
+    cmd.extend(extra)
+    cmd.extend([str(kernel_cpp), "-o", str(out_ll)])
+    run(cmd)
 
 
 def run_polly_pass(opt, ll_file):
@@ -285,25 +287,47 @@ def export_kernel(frame, work_dir, out_lib, tuning_trials):
 
 
 def compile_cpp(cxx, src, obj, tvm_home, extra=()):
+    # `extra` is placed before `-c <src>` so things like `-x c` apply to the
+    # source file, and so a later `-std=` in `extra` overrides our `-std=c++17`
+    # default (clang takes the last -std= when multiple are given).
     cmd = [
         str(cxx), "-O3", "-march=native", "-std=c++17",
-        "-c", str(src), "-o", str(obj),
         f"-I{tvm_home}/include",
         f"-I{tvm_home}/3rdparty/tvm-ffi/include",
         f"-I{tvm_home}/3rdparty/tvm-ffi/3rdparty/dlpack/include",
     ]
     cmd.extend(extra)
+    cmd.extend(["-c", str(src), "-o", str(obj)])
     run(cmd)
 
 
-def objcopy_redefine(objcopy, obj_path, redefines):
-    """redefines: list of (old_sym, new_sym)."""
-    if not redefines:
-        return
-    cmd = [str(objcopy)]
-    for old, new in redefines:
-        cmd.extend(["--redefine-sym", f"{old}={new}"])
-    cmd.append(str(obj_path))
+def llvm_extract_delete(llvm_extract, ll_in, func_names, ll_out):
+    """Strip the bodies of `func_names` out of `ll_in`, writing the result to
+    `ll_out`. Each named function survives as an external declaration, so any
+    same-TU caller's reference becomes an UNDEF relocation at compile time and
+    binds to the wrapper's strong definition at link time. This is what makes
+    single-file benchmarks (kernel + main in one .c) work without needing the
+    old objcopy --redefine-sym trick, which would have rewritten same-TU
+    call-site relocations along with the definition.
+
+    Assumes each function has external linkage; `static` kernels would survive
+    extraction as `internal` declarations and not bind to the wrapper.
+    """
+    cmd = [str(llvm_extract), "--delete", "-S"]
+    for n in func_names:
+        cmd.extend([f"--func={n}"])
+    cmd.extend([str(ll_in), "-o", str(ll_out)])
+    run(cmd)
+
+
+def compile_ll(cxx, ll_in, obj_out, extra=()):
+    """Compile an .ll IR file to an object at -O3. No -I paths — pure IR
+    skips the preprocessor."""
+    cmd = [
+        str(cxx), "-O3", "-march=native", "-std=c++17",
+        "-c", str(ll_in), "-o", str(obj_out),
+    ]
+    cmd.extend(extra)
     run(cmd)
 
 
@@ -314,7 +338,7 @@ def link_binary(cxx, objs, out_bin, tvm_home):
         "-o", str(out_bin),
         f"-L{tvm_home}/build", f"-L{tvm_home}/build/lib",
         "-ltvm_runtime", "-ltvm_ffi",
-        "-ldl", "-pthread",
+        "-ldl", "-pthread", "-lm",
     ]
     run(cmd)
 
@@ -338,7 +362,14 @@ def main():
                         help="Skip clang+opt+polly_pass; read framed records "
                              "from this file instead. For testing the rest of "
                              "the pipeline before polly_pass emits frames.")
+    parser.add_argument("--cflags", default="",
+                        help="Extra flags forwarded to clang for the kernel "
+                             "IR emission and for compiling kernel/extras "
+                             "(e.g. \"-x c -std=c99 -DMINI_DATASET -Ifoo\"). "
+                             "Not applied to the auto-generated wrapper.cpp "
+                             "or to the .ll-to-.o compile step.")
     args = parser.parse_args()
+    cflags = shlex.split(args.cflags)
 
     tvm_home = os.environ.get("TVM_HOME")
     if not tvm_home:
@@ -353,12 +384,9 @@ def main():
 
     clang = LLVM_BIN / "clang++"
     opt = LLVM_BIN / "opt"
-    if not clang.exists() or not opt.exists():
-        sys.exit(f"error: in-tree clang++/opt missing under {LLVM_BIN}")
-
-    objcopy = shutil.which("objcopy")
-    if not objcopy:
-        sys.exit("error: objcopy not on PATH")
+    llvm_extract = LLVM_BIN / "llvm-extract"
+    if not clang.exists() or not opt.exists() or not llvm_extract.exists():
+        sys.exit(f"error: in-tree clang++/opt/llvm-extract missing under {LLVM_BIN}")
 
     kernel_cpp = Path(args.kernel).resolve()
     if not kernel_cpp.exists():
@@ -372,16 +400,22 @@ def main():
     (build_dir / "tvm_libs").mkdir(exist_ok=True)
     (build_dir / "wrappers").mkdir(exist_ok=True)
 
-    # 1+2. Get framed records — either from polly_pass or from a canned file.
+    # 1. Always lower the kernel to LLVM IR. Polly_pass consumes it to find
+    #    convertible functions; step 4 strips those functions' bodies out of
+    #    the same IR so same-TU callers (e.g. main() in a PolyBench
+    #    single-file benchmark) end up with UNDEF relocations that the
+    #    wrapper's strong definition will satisfy at link time.
+    ll_path = build_dir / (kernel_cpp.stem + ".ll")
+    sys.stderr.write("[1/6] Lowering kernel to LLVM IR...\n")
+    emit_llvm_ir(clang, kernel_cpp, ll_path, extra=cflags)
+
+    # 2. Get framed records — either from polly_pass or from a canned file.
     if args.frames_from:
         sys.stderr.write(
-            f"[1-2/6] Skipping polly_pass; reading frames from {args.frames_from}\n"
+            f"[2/6] Skipping polly_pass; reading frames from {args.frames_from}\n"
         )
         polly_stdout = Path(args.frames_from).read_text()
     else:
-        ll_path = build_dir / (kernel_cpp.stem + ".ll")
-        sys.stderr.write("[1/6] Lowering kernel to LLVM IR...\n")
-        emit_llvm_ir(clang, kernel_cpp, ll_path)
         sys.stderr.write("[2/6] Running polly_pass...\n")
         polly_stdout = run_polly_pass(opt, ll_path)
     frames = parse_frames(polly_stdout)
@@ -396,7 +430,6 @@ def main():
     # 3. Per-function: tune+export .so, render wrapper.cpp
     sys.stderr.write("[3/6] Tuning and exporting per-function .so libs...\n")
     wrapper_objs = []
-    redefines = []
     for f in frames:
         work_dir = build_dir / "tvm_logs" / f"{f.function}__{f.tir_sha}"
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -410,21 +443,31 @@ def main():
         compile_cpp(clang, wrapper_src, wrapper_obj, tvm_home)
         wrapper_objs.append(wrapper_obj)
 
-        redefines.append((f.function, f"{f.function}__orig"))
-
-    # 4. Compile original kernel.cpp -> .o, then objcopy --redefine-sym
-    sys.stderr.write("[4/6] Compiling original kernel...\n")
+    # 4. Build kernel.o. If polly_pass found convertible functions, strip
+    #    their bodies out of the IR (leaving external declarations) and
+    #    compile what remains. Any in-TU caller of a stripped function ends
+    #    up with an UNDEF relocation that resolves to the wrapper at link
+    #    time. If there are no frames, fall through to compiling the
+    #    original source as-is.
     kernel_obj = build_dir / (kernel_cpp.stem + ".o")
-    compile_cpp(clang, kernel_cpp, kernel_obj, tvm_home)
-    sys.stderr.write("[4b/6] Renaming replaced symbols in kernel.o...\n")
-    objcopy_redefine(objcopy, kernel_obj, redefines)
+    if frames:
+        sys.stderr.write("[4/6] Stripping replaced functions from kernel IR...\n")
+        stripped_ll = build_dir / (kernel_cpp.stem + ".stripped.ll")
+        llvm_extract_delete(
+            llvm_extract, ll_path, [f.function for f in frames], stripped_ll
+        )
+        sys.stderr.write("[4b/6] Compiling stripped kernel IR...\n")
+        compile_ll(clang, stripped_ll, kernel_obj)
+    else:
+        sys.stderr.write("[4/6] Compiling original kernel...\n")
+        compile_cpp(clang, kernel_cpp, kernel_obj, tvm_home, extra=cflags)
 
     # 5. Compile extras (driver, etc.)
     sys.stderr.write("[5/6] Compiling extras...\n")
     extra_objs = []
     for ex in extras:
         ex_obj = build_dir / (ex.stem + ".o")
-        compile_cpp(clang, ex, ex_obj, tvm_home)
+        compile_cpp(clang, ex, ex_obj, tvm_home, extra=cflags)
         extra_objs.append(ex_obj)
 
     # 6. Link
