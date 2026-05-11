@@ -1,0 +1,9 @@
+[submodule "src/tests/src/tests/polybench"]
+	path = src/tests/src/tests/polybench
+	url = https://github.com/MatthiasJReisinger/PolyBenchC-4.2.1.git
+[submodule "src/tests/polybench"]
+	path = src/tests/polybench
+	url = https://github.com/MatthiasJReisinger/PolyBenchC-4.2.1.git
+[submodule "src/tests/PolyBenchC-4.2.1"]
+	path = src/tests/PolyBenchC-4.2.1
+	url = https://github.com/MatthiasJReisinger/PolyBenchC-4.2.1.git

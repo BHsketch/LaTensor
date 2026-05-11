@@ -9,5 +9,13 @@ frontend/build/*
 CLAUDE.md
 .DS_Store
 llvm-project/
+llvm-project-v23/
 setup.sh
 claude_gen/
+
+# Build artifacts and analysis output
+*.ll
+*.out
+src/core/build/
+.claude
+src/pipeline/__pycache__/

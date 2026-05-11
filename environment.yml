@@ -1,0 +1,38 @@
+name: tvm-build-venv
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  # Core build tools
+  - git
+  - python=3.11
+  - pip
+
+  # Useful system libraries
+  - ncurses
+  - openssl
+  - zstd
+
+  - pip:
+      - apache-tvm-ffi==0.1.9
+      - attrs
+      - cloudpickle
+      - contourpy
+      - cycler
+      - decorator
+      - fonttools
+      - kiwisolver
+      - matplotlib
+      - numpy
+      - pillow
+      - psutil
+      - pyparsing
+      - python-dateutil
+      - scipy
+      - six
+      - tornado
+      - typing-extensions
+      - xgboost
+
+      # Optional: Uncomment this ONLY if running on a Linux machine with an NVIDIA GPU
+      # - nvidia-nccl-cu12==2.29.7
