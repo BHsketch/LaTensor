@@ -33,7 +33,7 @@ from pathlib import Path
 
 PIPELINE_DIR = Path(__file__).resolve().parent
 REPO_ROOT = PIPELINE_DIR.parent.parent
-LLVM_BIN = REPO_ROOT / "llvm-project" / "build" / "bin"
+LLVM_BIN = Path("/usr/lib/llvm-21/bin/")
 POLLY_PLUGIN = REPO_ROOT / "src" / "core" / "build" / "MyPollyPass.so"
 WRAPPER_TEMPLATE = PIPELINE_DIR / "wrapper_template.cpp.in"
 EXPORT_TVM = PIPELINE_DIR / "export_tvm.py"

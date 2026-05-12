@@ -14,15 +14,15 @@
 
 set -uo pipefail
 
-BASELOC="/home/bhavya/cosmos/life/UIUC/academics/coursework/CS526/latensor"
+BASELOC="/workspace"
 PIPELINEDIR="${BASELOC}/src/pipeline"
 TESTDIR="${BASELOC}/src/tests"
 POLYBENCH_ROOT="${TESTDIR}/PolyBenchC-4.2.1"
 POLYBENCH_UTILS="${POLYBENCH_ROOT}/utilities"
 TVMLIB="/home/bhavya/cosmos/cse/projects/tvm/build:/home/bhavya/cosmos/cse/projects/tvm/build/lib"
-LLVMBIN="${BASELOC}/llvm-project/build/bin"
-CLANGXX="${LLVMBIN}/clang++"
-CLANG="${LLVMBIN}/clang"
+LLVMBIN="/usr/bin"
+CLANGXX="/usr/bin/clang++"
+CLANG="/usr/bin/clang"
 
 BUILD_ROOT="${PIPELINEDIR}/build_dir"
 mkdir -p "${BUILD_ROOT}"

@@ -2,12 +2,12 @@
 
 # Setup env
 # # exporting clang path
-export PATH=~/cosmos/life/UIUC/academics/coursework/CS526/latensor/llvm-project/build/bin:$PATH
-LLVM="/home/bhavya/cosmos/life/UIUC/academics/coursework/CS526/latensor/llvm-project/build/bin"
+#export PATH=~/cosmos/life/UIUC/academics/coursework/CS526/latensor/llvm-project/build/bin:$PATH
+#LLVM="/home/bhavya/cosmos/life/UIUC/academics/coursework/CS526/latensor/llvm-project/build/bin"
 BENCH=$1
-CLANG="${LLVM}/clang++"
-OPT="${LLVM}/opt"
-CORE="/home/bhavya/cosmos/life/UIUC/academics/coursework/CS526/latensor/src/core"
+#CLANG="${LLVM}/clang++"
+#OPT="${LLVM}/opt"
+#CORE="/home/bhavya/cosmos/life/UIUC/academics/coursework/CS526/latensor/src/core"
 
 rm -rf *.jscop
 
